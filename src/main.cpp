@@ -18,6 +18,12 @@ void signalHandler(int signal)
 	}
 }
 
+//loads the JSON
+//creates every module object the JSON asks for
+//initializes every module based on its respective config
+//links modules to each other
+//starts every module's threads and workers
+//keeps running
 int main(int argc, char *argv[])
 {
 	if (argc < 2)

@@ -1,10 +1,13 @@
 {
+	/*global app metadata*/
 	"APP": {
+		/*class: the class name of the module in C++*/
 		"class": "ModuleMgr",
 		"appName": "helloOK",
-		"bLog": true,
-		"bStdErr": true
+		"bLog": true /*whether to log to log file*/,
+		"bStdErr": true /*whether to log to stderr*/
 	},
+	/*console module*/
 	"console": {
 		"class": "_Console",
 		"bON": false,
@@ -17,6 +20,7 @@
 			"cam"
 		]
 	},
+	/*view module*/
 	"view": {
 		"class": "_WindowCV",
 		"bON": true,
@@ -30,6 +34,7 @@
 			"cam"
 		]
 	},
+	/*camera module*/
 	"cam": {
 		"class": "_Camera",
 		"bON": true,

@@ -106,7 +106,11 @@
         "__hash_table": "cpp",
         "__split_buffer": "cpp",
         "__tree": "cpp",
-        "future": "cpp"
+        "future": "cpp",
+        "**/jsonCfg/*.json": "jsonc",
+        "**/jsonCfg/**/*.json": "jsonc",
+        "**/jsonCfg/*.kiss": "jsonc",
+        "**/jsonCfg/**/*.kiss": "jsonc"
     },
     "cmake.configureOnOpen": true
 }
