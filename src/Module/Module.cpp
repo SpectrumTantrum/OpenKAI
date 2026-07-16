@@ -46,6 +46,9 @@ namespace kai
 #ifdef USE_GUI
 		ADD_MODULE(_GeometryViewer);
 #endif
+#ifdef USE_IMGUI
+		ADD_MODULE(ImGUIviewer);
+#endif
 #endif
 
 #ifdef WITH_ACTUATOR
@@ -296,6 +299,8 @@ namespace kai
 		ADD_MODULE(_Threshold);
 		ADD_MODULE(_Thermal2RGB);
 		ADD_MODULE(_VideoFile);
+		ADD_MODULE(_Frame2Img);
+		ADD_MODULE(_Img2Frame);
 
 #ifdef USE_CUDA
 		ADD_MODULE(_DenseFlow);

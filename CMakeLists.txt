@@ -13,6 +13,7 @@ option(USE_DYNAMIXEL "Use Dynamixel" OFF)
 option(USE_FEETECH "Use Feetech" OFF)
 option(USE_FASTLIVO "Use FastLivo2" OFF)
 option(USE_GUI "Use GUI" OFF)
+option(USE_IMGUI "Use Dear ImGui 3D viewer" OFF)
 option(USE_GLOG "Use glog" ON)
 option(USE_JETSON_INFERENCE "Use Jetson Inference" OFF)
 option(USE_MATHGL "Use MathGL" OFF)
@@ -59,6 +60,15 @@ option(WITH_UI "" OFF)
 option(WITH_UNIVERSE "" OFF)
 option(WITH_VISION "" OFF)
 option(WITH_TEST "Build with unit test modules" OFF)
+
+set(IMGUI_BACKEND "GLFW" CACHE STRING "Dear ImGui platform backend: GLFW or SDL2")
+set_property(CACHE IMGUI_BACKEND PROPERTY STRINGS GLFW SDL2)
+set(IMGUI_RENDERER "OPENGL" CACHE STRING "Dear ImGui renderer backend: OPENGL or OPENGLES")
+set_property(CACHE IMGUI_RENDERER PROPERTY STRINGS OPENGL OPENGLES)
+set(IMGUI_DIR "imgui" CACHE PATH "Dear ImGui source root containing imgui.cpp and backends/")
+if(USE_IMGUI AND NOT USE_OPEN3D)
+  message(FATAL_ERROR "USE_IMGUI currently requires USE_OPEN3D because OpenKAI 3D geometry classes use Open3D data types")
+endif()
 
 find_package(Eigen3 3.1.0 REQUIRED)
 
@@ -149,6 +159,10 @@ if(WITH_3D)
     set(OpenKAI_cpp ${OpenKAI_cpp} src/3D/PointCloud/PCregistration/_PCregistGlobal.cpp)
     if(USE_GUI)
       set(OpenKAI_cpp ${OpenKAI_cpp} src/3D/_GeometryViewer.cpp)
+    endif()
+    if(USE_IMGUI)
+      set(OpenKAI_cpp ${OpenKAI_cpp} src/3D/Viewer/ImGUIviewer.cpp)
+      set(OpenKAI_cpp ${OpenKAI_cpp} src/3D/Viewer/ImGuiViewerBackend.cpp)
     endif()
   endif()
 endif()
@@ -441,6 +455,8 @@ if(WITH_VISION)
     set(OpenKAI_cpp ${OpenKAI_cpp} src/Vision/_ImgFile.cpp)
     set(OpenKAI_cpp ${OpenKAI_cpp} src/Vision/_GStreamer.cpp)
     set(OpenKAI_cpp ${OpenKAI_cpp} src/Vision/_GPhoto.cpp)
+    set(OpenKAI_cpp ${OpenKAI_cpp} src/Vision/_Frame2Img.cpp)
+    set(OpenKAI_cpp ${OpenKAI_cpp} src/Vision/_Img2Frame.cpp)
     set(OpenKAI_cpp ${OpenKAI_cpp} src/Vision/RGBD/_D2G.cpp)
     set(OpenKAI_cpp ${OpenKAI_cpp} src/Vision/RGBD/_D2RGB.cpp)
     set(OpenKAI_cpp ${OpenKAI_cpp} src/Vision/ImgFilter/_Contrast.cpp)
@@ -497,7 +513,6 @@ if(USE_CUDA)
   set(CUDA_include "/usr/local/cuda/include" CACHE STRING "")
   set(OpenKAI_include ${OpenKAI_include} ${CUDA_include})
   set(CUDA_ARCH "72" CACHE STRING "")
-  set(OpenKAI_lib ${OpenKAI_lib} opencv_cudawarping opencv_cudaobjdetect opencv_cudaarithm opencv_cudabgsegm opencv_cudaimgproc opencv_cudaoptflow opencv_cudastereo)
 endif()
 
 if(USE_DYNAMIXEL)
@@ -519,6 +534,85 @@ endif()
 if(USE_GUI)
   add_definitions(-DUSE_GUI)
   set(OpenKAI_lib ${OpenKAI_lib} glfw GL m GLU GLEW)
+endif()
+
+if(USE_IMGUI)
+  add_definitions(-DUSE_IMGUI)
+
+  string(TOUPPER "${IMGUI_BACKEND}" IMGUI_BACKEND_UPPER)
+  string(TOUPPER "${IMGUI_RENDERER}" IMGUI_RENDERER_UPPER)
+
+  if(NOT IMGUI_BACKEND_UPPER STREQUAL "GLFW" AND NOT IMGUI_BACKEND_UPPER STREQUAL "SDL2")
+    message(FATAL_ERROR "IMGUI_BACKEND must be GLFW or SDL2")
+  endif()
+
+  if(NOT IMGUI_RENDERER_UPPER STREQUAL "OPENGL" AND NOT IMGUI_RENDERER_UPPER STREQUAL "OPENGLES")
+    message(FATAL_ERROR "IMGUI_RENDERER must be OPENGL or OPENGLES")
+  endif()
+
+  set(IMGUI_INCLUDE_DIR ${IMGUI_DIR})
+  set(IMGUI_BACKENDS_DIR ${IMGUI_DIR}/backends)
+  set(OpenKAI_cpp
+    ${OpenKAI_cpp}
+    ${IMGUI_DIR}/imgui.cpp
+    ${IMGUI_DIR}/imgui_draw.cpp
+    ${IMGUI_DIR}/imgui_tables.cpp
+    ${IMGUI_DIR}/imgui_widgets.cpp
+  )
+
+  if(NOT IMGUI_INCLUDE_DIR)
+    message(FATAL_ERROR "USE_IMGUI requires IMGUI_DIR or IMGUI_INCLUDE_DIR")
+  endif()
+  if(NOT IMGUI_BACKENDS_DIR)
+    message(FATAL_ERROR "USE_IMGUI requires IMGUI_DIR or IMGUI_BACKENDS_DIR")
+  endif()
+
+  set(OpenKAI_include ${OpenKAI_include} ${IMGUI_INCLUDE_DIR} ${IMGUI_BACKENDS_DIR})
+
+  if(IMGUI_BACKEND_UPPER STREQUAL "GLFW")
+    add_definitions(-DOKAI_IMGUI_BACKEND_GLFW)
+    if(EXISTS "${IMGUI_BACKENDS_DIR}/imgui_impl_glfw.cpp")
+      set(OpenKAI_cpp ${OpenKAI_cpp} ${IMGUI_BACKENDS_DIR}/imgui_impl_glfw.cpp)
+    endif()
+    find_package(glfw3 QUIET)
+    if(glfw3_FOUND)
+      set(OpenKAI_lib ${OpenKAI_lib} glfw)
+    else()
+      set(OpenKAI_lib ${OpenKAI_lib} glfw)
+    endif()
+  elseif(IMGUI_BACKEND_UPPER STREQUAL "SDL2")
+    add_definitions(-DOKAI_IMGUI_BACKEND_SDL)
+    if(EXISTS "${IMGUI_BACKENDS_DIR}/imgui_impl_sdl2.cpp")
+      set(OpenKAI_cpp ${OpenKAI_cpp} ${IMGUI_BACKENDS_DIR}/imgui_impl_sdl2.cpp)
+    endif()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(SDL2 REQUIRED sdl2)
+    set(OpenKAI_include ${OpenKAI_include} ${SDL2_INCLUDE_DIRS})
+    set(OpenKAI_libDir ${OpenKAI_libDir} ${SDL2_LIBRARY_DIRS})
+    set(OpenKAI_lib ${OpenKAI_lib} ${SDL2_LIBRARIES})
+  endif()
+
+  if(IMGUI_RENDERER_UPPER STREQUAL "OPENGL")
+    add_definitions(-DOKAI_IMGUI_RENDERER_OPENGL)
+    if(EXISTS "${IMGUI_BACKENDS_DIR}/imgui_impl_opengl3.cpp")
+      set(OpenKAI_cpp ${OpenKAI_cpp} ${IMGUI_BACKENDS_DIR}/imgui_impl_opengl3.cpp)
+    endif()
+    find_package(OpenGL REQUIRED)
+    set(OpenKAI_lib ${OpenKAI_lib} OpenGL::GL)
+  elseif(IMGUI_RENDERER_UPPER STREQUAL "OPENGLES")
+    add_definitions(-DOKAI_IMGUI_RENDERER_OPENGLES)
+    if(EXISTS "${IMGUI_BACKENDS_DIR}/imgui_impl_opengl3.cpp")
+      set(OpenKAI_cpp ${OpenKAI_cpp} ${IMGUI_BACKENDS_DIR}/imgui_impl_opengl3.cpp)
+    endif()
+    find_library(OPENGLES_LIB GLESv2)
+    if(NOT OPENGLES_LIB)
+      find_library(OPENGLES_LIB GLESv3)
+    endif()
+    if(NOT OPENGLES_LIB)
+      message(FATAL_ERROR "IMGUI_RENDERER=OPENGLES requires GLESv2 or GLESv3")
+    endif()
+    set(OpenKAI_lib ${OpenKAI_lib} ${OPENGLES_LIB})
+  endif()
 endif()
 
 if(USE_JETSON_INFERENCE)
@@ -553,16 +647,44 @@ endif()
 
 if(USE_OPENCV)
   add_definitions(-DUSE_OPENCV)
-  set(OpenCV_include "/usr/local/include/opencv4" CACHE STRING "")
-  set(OpenCV_lib "/usr/local/lib" CACHE STRING "")
-  set(OpenKAI_include ${OpenKAI_include} ${OpenCV_include})
-  set(OpenKAI_libDir ${OpenKAI_libDir} ${OpenCV_lib})
-  set(OpenKAI_lib ${OpenKAI_lib} opencv_core opencv_imgcodecs opencv_highgui opencv_imgproc opencv_videoio opencv_calib3d opencv_objdetect opencv_features2d opencv_dnn)
-endif()
 
-if(USE_OPENCV_CONTRIB)
-  add_definitions(-DUSE_OPENCV_CONTRIB)
-  set(OpenKAI_lib ${OpenKAI_lib} opencv_xobjdetect opencv_tracking opencv_aruco)
+  set(OpenCV_DIR "/usr/local/lib/cmake/opencv5" CACHE PATH "OpenCV 5 CMake package directory")
+  set(OpenKAI_OPENCV_COMPONENTS
+    core
+    imgcodecs
+    highgui
+    imgproc
+    videoio
+    calib
+    objdetect
+    features
+    dnn
+  )
+
+  if(USE_OPENCV_CONTRIB)
+    add_definitions(-DUSE_OPENCV_CONTRIB)
+    list(APPEND OpenKAI_OPENCV_COMPONENTS
+      bgsegm
+      tracking
+      xobjdetect
+    )
+  endif()
+
+  if(USE_CUDA)
+    list(APPEND OpenKAI_OPENCV_COMPONENTS
+      cudawarping
+      cudaobjdetect
+      cudaarithm
+      cudabgsegm
+      cudaimgproc
+      cudaoptflow
+      cudastereo
+    )
+  endif()
+
+  find_package(OpenCV 5 REQUIRED CONFIG COMPONENTS ${OpenKAI_OPENCV_COMPONENTS})
+  set(OpenKAI_include ${OpenKAI_include} ${OpenCV_INCLUDE_DIRS})
+  set(OpenKAI_lib ${OpenKAI_lib} ${OpenCV_LIBS})
 endif()
 
 if(USE_ONNXRUNTIME)
@@ -637,8 +759,9 @@ endif()
 
 if(USE_SCEPTER_SDK)
   add_definitions(-DUSE_SCEPTER_SDK)
-  set(Scepter_include "ScepterSDK/BaseSDK/Ubuntu/Include" CACHE STRING "")
-  set(Scepter_lib "ScepterSDK/BaseSDK/Ubuntu/Lib" CACHE STRING "")
+  set(ScepterSDK_root "ScepterSDK/BaseSDK/Ubuntu" CACHE STRING "")
+  set(Scepter_include ${ScepterSDK_root}/Include)
+  set(Scepter_lib ${ScepterSDK_root}/Lib)
   set(OpenKAI_include ${OpenKAI_include} ${Scepter_include})
   set(OpenKAI_libDir ${OpenKAI_libDir} ${Scepter_lib})
   set(OpenKAI_lib ${OpenKAI_lib} Scepter_api)
