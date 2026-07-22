@@ -1,0 +1,36 @@
+# Docker build/dev/test interface for OpenKAI.
+# Run from the repo root, e.g.:
+#   docker compose -f docker/compose.yaml build openkai      # compile (build the image)
+#   docker compose -f docker/compose.yaml run --rm openkai   # smoke test
+#   docker compose -f docker/compose.yaml run --rm dev       # interactive dev shell
+#
+# The build context is the repo root (..); the Dockerfile lives in docker/.
+
+services:
+  # Full compile of OpenKAI in Release with the maximal SDK-free module set.
+  # Its default command runs the headless smoke test.
+  openkai:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: build
+    image: openkai:build
+    init: true
+
+  # Interactive dev shell: repo bind-mounted at /work, build dir kept in a
+  # named volume so Linux artifacts never touch the macOS host tree.
+  dev:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: deps
+    image: openkai:deps
+    init: true
+    working_dir: /work
+    volumes:
+      - ..:/work
+      - openkai-build:/work/build
+    command: bash
+
+volumes:
+  openkai-build:

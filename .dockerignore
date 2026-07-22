@@ -1,0 +1,16 @@
+# Keep the build context small and free of host (macOS/Linux) build artifacts.
+.git
+.github
+build/
+*/build/
+cmake-build-*/
+.vscode/
+.idea/
+.DS_Store
+**/.DS_Store
+*.o
+*.d
+*.so
+*.a
+OpenKAI
+docker/*.log

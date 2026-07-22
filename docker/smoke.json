@@ -1,0 +1,21 @@
+{
+	"APP": {
+		"class": "ModuleMgr",
+		"appName": "smoke",
+		"bLog": true,
+		"bStdErr": true
+	},
+	"udp": {
+		"class": "_UDP",
+		"bON": true,
+		"thread": {
+			"name": "thread",
+			"class": "_Thread",
+			"FPS": 10
+		},
+		"addrRemote": "127.0.0.1",
+		"portRemote": 8889,
+		"portLocal": 8888,
+		"bW2R": true
+	}
+}
