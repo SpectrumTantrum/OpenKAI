@@ -124,6 +124,14 @@ Then rebuild the consumer app (e.g. LCAS) against the freshly installed library,
 just the library alone — see the LCAS-side doc for why both layers need to move
 together.
 
+**On a dev machine, installing straight to `/usr/local` is often the wrong move** —
+it clobbers the system-wide `libOpenKAI.so` while other uncommitted work may still
+depend on it. `LCAS/docs/build-dev-machine.md` (in the LCAS repo) is the preventive
+recipe for this: the full two-layer configure using a private install prefix
+(`CMAKE_INSTALL_PREFIX` under `$HOME`, no `sudo` needed), worked through against a
+real machine, with every flag below verified against this branch's actual
+`CMakeLists.txt`.
+
 ## How to verify
 
 - **Check what a binary is actually linked against — don't trust `ldd`.** `ldd` lists
