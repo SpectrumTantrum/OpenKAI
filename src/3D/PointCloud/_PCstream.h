@@ -22,6 +22,15 @@ namespace kai
         return i;
     }
 
+    struct PCSTREAM_SNAPSHOT
+    {
+        uint64_t m_sequence = 0;
+        uint64_t m_tStamp = 0;
+        vector<GEOMETRY_POINT> m_vP;
+    };
+
+    using PCSTREAM_SNAPSHOT_PTR = shared_ptr<const PCSTREAM_SNAPSHOT>;
+
     class _PCstream : public _GeometryBase
     {
     public:
@@ -48,12 +57,19 @@ namespace kai
         virtual void copyTo(PointCloud *pPC, const uint64_t tExpire = 0);
         virtual void add(const Vector3d &vP, const Vector3f &vC, uint64_t tStamp = 1);
         virtual void add(const vFloat3 &vP, const vFloat3 &vC, uint64_t tStamp = 1);
+        virtual void addBatch(const vector<GEOMETRY_POINT> &vP);
+        virtual PCSTREAM_SNAPSHOT_PTR getSnapshot(void);
+        virtual void copyRingTo(vector<GEOMETRY_POINT> *pRing);
 
+        // Legacy direct access. Concurrent readers must use getSnapshot() or
+        // copyRingTo().
         virtual GEOMETRY_POINT *get(int i);
         virtual int nP(void);
         virtual int iP(void);
 
     private:
+        void invalidateSnapshot(void);
+        PCSTREAM_SNAPSHOT_PTR buildSnapshot(void);
         void updatePCstream(void);
         virtual void update(void);
         static void *getUpdate(void *This)
@@ -67,6 +83,9 @@ namespace kai
         GEOMETRY_POINT *m_pP;
         int m_nP;
         int m_iP;
+        int m_nValid;
+        uint64_t m_sequence;
+        PCSTREAM_SNAPSHOT_PTR m_pSnapshot;
     };
 
 }

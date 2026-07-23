@@ -395,6 +395,10 @@ namespace kai
 		const static float s_b = 1.0 / 1000.0;
 		const static float c_b = 1.0 / 255.0;
 
+		vector<GEOMETRY_POINT> vPoints;
+		vPoints.reserve(m_scfDepth.height * m_scfDepth.width);
+		uint64_t tFrame = getApproxTbootUs();
+
 		// Convert Depth frame to World vectors.
 		scConvertDepthFrameToPointCloudVector(m_scDevHandle,
 											  &m_scfDepth,
@@ -421,9 +425,15 @@ namespace kai
 					vC *= c_b;
 				}
 
-				m_pPCstream->add(vP, vC); //, m_tDus);
+				GEOMETRY_POINT point;
+				point.m_vP = vP;
+				point.m_vC = vC;
+				point.m_tStamp = tFrame;
+				vPoints.push_back(point);
 			}
 		}
+
+		m_pPCstream->addBatch(vPoints);
 	}
 #endif
 

@@ -69,6 +69,11 @@ namespace kai
 	{
 	}
 
+	bool BASE::join(void)
+	{
+		return true;
+	}
+
 	void BASE::setName(const string &n)
 	{
 		m_name = n;

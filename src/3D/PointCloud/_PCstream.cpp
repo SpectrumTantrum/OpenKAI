@@ -17,13 +17,17 @@ namespace kai
         m_pP = nullptr;
         m_nP = 10000;
         m_iP = 0;
+        m_nValid = 0;
+        m_sequence = 0;
+        m_pSnapshot = nullptr;
     }
 
     _PCstream::~_PCstream()
     {
         m_iP = 0;
+        m_nValid = 0;
         m_nP = 0;
-        DEL(m_pP);
+        DEL_ARRAY(m_pP);
     }
 
     bool _PCstream::init(const json &j)
@@ -40,6 +44,7 @@ namespace kai
     {
         mutexLock();
 
+        DEL_ARRAY(m_pP);
         m_pP = new GEOMETRY_POINT[m_nP];
         if (!m_pP)
         {
@@ -47,10 +52,12 @@ namespace kai
             return false;
         }
         m_iP = 0;
+        m_nValid = 0;
 
         for (int i = 0; i < m_nP; i++)
             m_pP[i].clear();
 
+        invalidateSnapshot();
         mutexUnlock();
 
         return true;
@@ -64,7 +71,9 @@ namespace kai
             m_pP[i].clear();
 
         m_iP = 0;
+        m_nValid = 0;
 
+        invalidateSnapshot();
         mutexUnlock();
     }
 
@@ -108,20 +117,20 @@ namespace kai
         NULL_(p);
         _PCstream *pS = (_PCstream *)p;
 
-        mutexLock();
-
+        PCSTREAM_SNAPSHOT_PTR pSnapshot = pS->getSnapshot();
+        NULL_(pSnapshot);
         uint64_t tNow = getApproxTbootUs();
+        vector<GEOMETRY_POINT> vP;
+        vP.reserve(pSnapshot->m_vP.size());
 
-        for (int i = 0; i < pS->m_nP; i++)
+        for (const GEOMETRY_POINT &p : pSnapshot->m_vP)
         {
-            GEOMETRY_POINT *pP = &pS->m_pP[i];
-            IF_CONT(tExpire > 0 && bExpired(pP->m_tStamp, tExpire, tNow));
+            IF_CONT(tExpire > 0 && p.m_tStamp != 0 && bExpired(p.m_tStamp, tExpire, tNow));
 
-            m_pP[m_iP] = *pP;
-            m_iP = iRing(m_iP, m_nP);
+            vP.push_back(p);
         }
 
-        mutexUnlock();
+        addBatch(vP);
     }
 
     void _PCstream::writeSharedMem(void)
@@ -132,7 +141,9 @@ namespace kai
 
         int nPw = small<int>(m_nP, m_pSM->nB() / sizeof(GEOMETRY_POINT));
 
+        mutexLock();
         memcpy(m_pSM->p(), m_pP, nPw * sizeof(GEOMETRY_POINT));
+        mutexUnlock();
     }
 
     void _PCstream::readSharedMem(void)
@@ -142,6 +153,8 @@ namespace kai
         IF_(m_pSM->bWriter());
 
         //		memcpy(m_pP, m_pSM->p(), m_nP * sizeof(GEOMETRY_POINT));
+        vector<GEOMETRY_POINT> vP;
+        vP.reserve(m_nP);
         GEOMETRY_POINT *pSM = (GEOMETRY_POINT *)m_pSM->p();
         for (int i = 0; i < m_nP; i++)
         {
@@ -158,9 +171,10 @@ namespace kai
                     (m_vkColB.constrain(d) - m_vkColB.x) * m_vkColOv.z);
             }
 
-            m_pP[m_iP] = p;
-            m_iP = iRing(m_iP, m_nP);
+            vP.push_back(p);
         }
+
+        addBatch(vP);
     }
 
     void _PCstream::copyTo(PointCloud *pPC, const uint64_t tExpire)
@@ -168,13 +182,15 @@ namespace kai
         IF_(!check());
         NULL_(pPC);
 
-        for (int i = 0; i < m_nP; i++)
-        {
-            GEOMETRY_POINT *pP = &m_pP[i];
-            IF_CONT(pP->m_tStamp < tExpire);
+        PCSTREAM_SNAPSHOT_PTR pSnapshot = getSnapshot();
+        NULL_(pSnapshot);
 
-            pPC->points_.push_back(v2e(pP->m_vP).cast<double>());
-            pPC->colors_.push_back(v2e(pP->m_vC).cast<double>());
+        for (const GEOMETRY_POINT &p : pSnapshot->m_vP)
+        {
+            IF_CONT(p.m_tStamp < tExpire);
+
+            pPC->points_.push_back(v2e(p.m_vP).cast<double>());
+            pPC->colors_.push_back(v2e(p.m_vC).cast<double>());
         }
     }
 
@@ -187,17 +203,91 @@ namespace kai
 
     void _PCstream::add(const vFloat3 &vP, const vFloat3 &vC, uint64_t tStamp)
     {
+        mutexLock();
+
         GEOMETRY_POINT *pP = &m_pP[m_iP];
         pP->m_vP = vP;
         pP->m_vC = vC;
         pP->m_tStamp = tStamp;
 
         m_iP = iRing(m_iP, m_nP);
+        if (m_nValid < m_nP)
+            ++m_nValid;
+        invalidateSnapshot();
+
+        mutexUnlock();
+    }
+
+    void _PCstream::addBatch(const vector<GEOMETRY_POINT> &vP)
+    {
+        IF_(vP.empty());
+        NULL_(m_pP);
+
+        mutexLock();
+
+        for (const GEOMETRY_POINT &p : vP)
+        {
+            m_pP[m_iP] = p;
+            m_iP = iRing(m_iP, m_nP);
+            if (m_nValid < m_nP)
+                ++m_nValid;
+        }
+
+        invalidateSnapshot();
+        mutexUnlock();
+    }
+
+    PCSTREAM_SNAPSHOT_PTR _PCstream::getSnapshot(void)
+    {
+        NULL_N(m_pP);
+
+        mutexLock();
+        if (!m_pSnapshot)
+            m_pSnapshot = buildSnapshot();
+        PCSTREAM_SNAPSHOT_PTR pSnapshot = m_pSnapshot;
+        mutexUnlock();
+
+        return pSnapshot;
+    }
+
+    void _PCstream::copyRingTo(vector<GEOMETRY_POINT> *pRing)
+    {
+        NULL_(pRing);
+
+        mutexLock();
+        if (m_pP && m_nP > 0)
+            pRing->assign(m_pP, m_pP + m_nP);
+        else
+            pRing->clear();
+        mutexUnlock();
+    }
+
+    void _PCstream::invalidateSnapshot(void)
+    {
+        ++m_sequence;
+        m_pSnapshot.reset();
+    }
+
+    PCSTREAM_SNAPSHOT_PTR _PCstream::buildSnapshot(void)
+    {
+        shared_ptr<PCSTREAM_SNAPSHOT> pSnapshot = make_shared<PCSTREAM_SNAPSHOT>();
+        pSnapshot->m_sequence = m_sequence;
+        pSnapshot->m_vP.reserve(m_nValid);
+
+        for (int i = 0; i < m_nValid; ++i)
+        {
+            const GEOMETRY_POINT &p = m_pP[i];
+
+            pSnapshot->m_vP.push_back(p);
+            pSnapshot->m_tStamp = big(pSnapshot->m_tStamp, p.m_tStamp);
+        }
+
+        return pSnapshot;
     }
 
     GEOMETRY_POINT *_PCstream::get(int i)
     {
-        IF__(i >= m_nP, nullptr);
+        IF__(i < 0 || i >= m_nP, nullptr);
 
         return &m_pP[i];
     }
@@ -209,7 +299,11 @@ namespace kai
 
     int _PCstream::iP(void)
     {
-        return m_iP;
+        mutexLock();
+        int iP = m_iP;
+        mutexUnlock();
+
+        return iP;
     }
 
     bool _PCstream::saveFile(const string &fName)

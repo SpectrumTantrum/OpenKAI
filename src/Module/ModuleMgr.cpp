@@ -14,12 +14,7 @@ namespace kai
 
 	ModuleMgr::~ModuleMgr(void)
 	{
-		for (void *pM : m_vModules)
-		{
-			DEL(pM);
-		}
-
-		m_vModules.clear();
+		cleanAll();
 	}
 
 	bool ModuleMgr::parseJsonFile(const string &fName)
@@ -86,9 +81,21 @@ namespace kai
 					continue;
 				}
 
-				int bON = true;
-				jKv(Ji, "bON", bON);
-				if (bON == 0)
+				bool bON = true;
+				auto itON = Ji.find("bON");
+				if (itON != Ji.end())
+				{
+					if (itON->is_boolean())
+						bON = itON->get<bool>();
+					else if (itON->is_number_integer())
+						bON = itON->get<int64_t>() != 0;
+					else
+					{
+						LOG_E("Invalid bON value: " + n);
+						return false;
+					}
+				}
+				if (!bON)
 				{
 					LOG_I("Module disabled: " + n);
 					continue;
@@ -203,6 +210,16 @@ namespace kai
 		// TODO
 	}
 
+	void ModuleMgr::joinAll(void)
+	{
+		for (void *pM : m_vModules)
+		{
+			BASE *pB = static_cast<BASE *>(pM);
+			if (!pB->join())
+				LOG_E(pB->getName() + ".join() failed");
+		}
+	}
+
 	void ModuleMgr::waitForComplete(void)
 	{
 		// TODO: temporal impl
@@ -220,10 +237,15 @@ namespace kai
 
 	void ModuleMgr::cleanAll(void)
 	{
+		stopAll();
+		joinAll();
+
 		for (void *pM : m_vModules)
 		{
-			DEL(pM);
+			BASE *pB = static_cast<BASE *>(pM);
+			DEL(pB);
 		}
+		m_vModules.clear();
 	}
 
 	void *ModuleMgr::findModule(const string &name)

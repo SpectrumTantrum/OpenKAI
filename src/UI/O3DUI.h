@@ -4,6 +4,9 @@
 #include "../Base/open3d.h"
 #include "../Utility/util.h"
 #include "../Utility/utilStr.h"
+#include <atomic>
+#include <map>
+#include <mutex>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
@@ -111,6 +114,8 @@ namespace open3d
 				virtual ~O3DUI();
 
 				virtual void Init(void);
+				virtual void RequestClose(void);
+				virtual bool bClosing(void) const;
 
 				// point cloud
 				virtual void AddPointCloud(const string &name,
@@ -175,6 +180,33 @@ namespace open3d
 				virtual void ExportCurrentImage(const string &path);
 				virtual string getBaseDirSave(void);
 
+			private:
+				enum class PENDING_GEOMETRY_TYPE
+				{
+					pointCloud,
+					mesh,
+					lineSet,
+					remove,
+				};
+
+				struct PENDING_GEOMETRY
+				{
+					PENDING_GEOMETRY_TYPE m_type = PENDING_GEOMETRY_TYPE::remove;
+					shared_ptr<t::geometry::PointCloud> m_pPointCloud;
+					shared_ptr<t::geometry::TriangleMesh> m_pMesh;
+					shared_ptr<geometry::LineSet> m_pLineSet;
+					rendering::MaterialRecord m_material;
+					bool m_bHasMaterial = false;
+					bool m_bAdd = false;
+					bool m_bVisible = true;
+				};
+
+				void queueGeometry(const string &name, PENDING_GEOMETRY &&geometry);
+				void queueAction(const string &name, function<void()> action);
+				bool flushPending(void);
+				void applyGeometry(const string &name, PENDING_GEOMETRY &geometry);
+				void beginClose(void);
+
 			protected:
 				virtual void Layout(const gui::LayoutContext &context);
 				virtual float ConvertToScaledPixels(int px);
@@ -182,6 +214,17 @@ namespace open3d
 			protected:
 				SceneWidget *m_pScene = NULL;
 				UIState m_uiState;
+
+				atomic<bool> m_bClosing;
+				mutex m_pendingMutex;
+				unordered_map<string, PENDING_GEOMETRY> m_pendingGeometry;
+				std::map<string, function<void()>> m_pendingActions;
+
+				unordered_map<string, shared_ptr<t::geometry::PointCloud>> m_livePointClouds;
+				unordered_map<string, shared_ptr<t::geometry::TriangleMesh>> m_liveMeshes;
+				unordered_map<string, shared_ptr<geometry::LineSet>> m_liveLineSets;
+				unordered_map<string, rendering::MaterialRecord> m_liveMaterials;
+				unordered_map<string, size_t> m_livePointCounts;
 			};
 
 		} // namespace visualizer

@@ -21,6 +21,7 @@ namespace kai
 		void resumeAll(void);
 		void pauseAll(void);
 		void stopAll(void);
+		void joinAll(void);
 		void waitForComplete(void);
 		bool bComplete(void);
 		void cleanAll(void);

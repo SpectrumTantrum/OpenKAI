@@ -53,7 +53,7 @@ namespace kai
             while (!check())
                 sleep(1);
 
-            _WebSocket *pWS = m_pWSserver->getClient(0);
+            shared_ptr<_WebSocket> pWS = m_pWSserver->getClientShared(0);
             IF_CONT(!pWS);
 
             uint8_t pB[512];

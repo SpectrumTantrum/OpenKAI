@@ -20,7 +20,6 @@ namespace kai
 		m_vCoR.set(0, 0, 0);
 
 		m_pWin = nullptr;
-		m_pUIstate = nullptr;
 		m_dirSave = "/home/lab/";
 
 		m_bFullScreen = false;
@@ -33,7 +32,24 @@ namespace kai
 
 	_GeometryViewer::~_GeometryViewer()
 	{
-		DEL(m_pWin);
+		if (m_pT)
+			m_pT->stop();
+
+		shared_ptr<O3DUI> pWin = atomic_load(&m_pWin);
+		if (pWin)
+			pWin->RequestClose();
+
+		if (m_pT)
+			m_pT->join();
+
+		if (m_pTui)
+		{
+			m_pTui->stop();
+			m_pTui->join();
+			DEL(m_pTui);
+		}
+
+		atomic_store(&m_pWin, shared_ptr<O3DUI>());
 	}
 
 	bool _GeometryViewer::init(const json &j)
@@ -72,7 +88,12 @@ namespace kai
 
 		utility::SetVerbosityLevel(utility::VerbosityLevel::Error);
 
-		DEL(m_pTui);
+		if (m_pTui)
+		{
+			m_pTui->stop();
+			m_pTui->join();
+			DEL(m_pTui);
+		}
 		m_pTui = createThread(jK(j, "threadUI"), "threadUI");
 		NULL_F(m_pTui);
 
@@ -138,8 +159,10 @@ namespace kai
 		// wait for the UI thread to get window ready
 		m_pT->sleepT(USEC_1SEC);
 
-		while (!addAllGeometries())
-			sleep(1);
+		while (m_pT->bAlive() && !addAllGeometries())
+			m_pT->sleepT(USEC_1SEC);
+
+		IF_(!m_pT->bAlive());
 
 		resetCamPose();
 		updateCamPose();
@@ -155,7 +178,8 @@ namespace kai
 	bool _GeometryViewer::addAllGeometries(void)
 	{
 		IF_F(!check());
-		IF_F(!m_pWin);
+		shared_ptr<O3DUI> pWin = atomic_load(&m_pWin);
+		IF_F(!pWin || pWin->bClosing());
 
 		for (int i = 0; i < m_vGO.size(); i++)
 		{
@@ -166,13 +190,13 @@ namespace kai
 			switch (gt)
 			{
 			case pc_stream:
-				m_pWin->RemoveGeometry(pG->m_name);
-				m_pWin->AddPointCloud(pG->m_name, &pG->m_tPC, &pG->m_mat);
+				pWin->RemoveGeometry(pG->m_name);
+				pWin->AddPointCloud(pG->m_name, &pG->m_tPC, &pG->m_mat);
 				break;
 			case pc_grid:
 				string n = (pG->m_bStatic) ? ("static" + pG->m_name) : ("dynamic" + pG->m_name + i2str(pG->m_iGridLS));
-				m_pWin->RemoveGeometry(n);
-				m_pWin->AddLineSet(n, &pG->m_ls, &pG->m_mat);
+				pWin->RemoveGeometry(n);
+				pWin->AddLineSet(n, &pG->m_ls, &pG->m_mat);
 				break;
 			}
 		}
@@ -183,7 +207,8 @@ namespace kai
 	void _GeometryViewer::updateAllGeometries(void)
 	{
 		IF_(!check());
-		IF_(!m_pWin);
+		shared_ptr<O3DUI> pWin = atomic_load(&m_pWin);
+		IF_(!pWin || pWin->bClosing());
 
 		for (int i = 0; i < m_vGO.size(); i++)
 		{
@@ -196,10 +221,10 @@ namespace kai
 			switch (gt)
 			{
 			case pc_stream:
-				m_pWin->UpdatePointCloud(pG->m_name, &pG->m_tPC);
+				pWin->UpdatePointCloud(pG->m_name, &pG->m_tPC);
 				break;
 			case pc_grid:
-				m_pWin->UpdateLineSet("dynamic" + pG->m_name + i2str(pG->m_iGridLS), &pG->m_ls, &pG->m_mat);
+				pWin->UpdateLineSet("dynamic" + pG->m_name + i2str(pG->m_iGridLS), &pG->m_ls, &pG->m_mat);
 				break;
 			}
 		}
@@ -208,18 +233,19 @@ namespace kai
 	void _GeometryViewer::updateCamProj(void)
 	{
 		IF_(!check());
-		IF_(!m_pWin);
+		shared_ptr<O3DUI> pWin = atomic_load(&m_pWin);
+		IF_(!pWin || pWin->bClosing());
 
 		if (m_camProj.m_type == 0) // Perspective
 		{
-			m_pWin->CamSetProj(m_camProj.m_fov,
+			pWin->CamSetProj(m_camProj.m_fov,
 							   m_camProj.m_vNF.x,
 							   m_camProj.m_vNF.y,
 							   m_camProj.m_fovType);
 		}
 		else
 		{
-			m_pWin->CamSetProj((Camera::Projection)m_camProj.m_type,
+			pWin->CamSetProj((Camera::Projection)m_camProj.m_type,
 							   m_camProj.m_vLR.x,
 							   m_camProj.m_vLR.y,
 							   m_camProj.m_vBT.x,
@@ -232,9 +258,10 @@ namespace kai
 	void _GeometryViewer::updateCamPose(void)
 	{
 		IF_(!check());
-		IF_(!m_pWin);
+		shared_ptr<O3DUI> pWin = atomic_load(&m_pWin);
+		IF_(!pWin || pWin->bClosing());
 
-		m_pWin->CamSetPose(v2e(m_cam.m_vLookAt),
+		pWin->CamSetPose(v2e(m_cam.m_vLookAt),
 						   v2e(m_cam.m_vEye),
 						   v2e(m_cam.m_vUp));
 	}
@@ -242,9 +269,10 @@ namespace kai
 	void _GeometryViewer::camBound(const AxisAlignedBoundingBox &aabb)
 	{
 		IF_(!check());
-		IF_(!m_pWin);
+		shared_ptr<O3DUI> pWin = atomic_load(&m_pWin);
+		IF_(!pWin || pWin->bClosing());
 
-		m_pWin->CamAutoBound(aabb, v2e(m_vCoR));
+		pWin->CamAutoBound(aabb, v2e(m_vCoR));
 	}
 
 	void _GeometryViewer::resetCamPose(void)
@@ -267,18 +295,26 @@ namespace kai
 	{
 		auto &app = gui::Application::GetInstance();
 		app.Initialize(m_pathRes.c_str());
+		IF_(!m_pTui || !m_pTui->bAlive());
 
-		m_pWin = new O3DUI(this->getName(), m_vWinSize.x, m_vWinSize.y);
-		m_pUIstate = m_pWin->getUIState();
-		m_pUIstate->m_bSceneCache = m_bSceneCache;
-		m_pUIstate->m_mouseMode = (visualization::gui::SceneWidget::Controls)m_mouseMode;
-		m_pUIstate->m_wPanel = m_wPanel;
-		m_pUIstate->m_sMove = m_vDmove.x;
-		m_pUIstate->m_dirSave = m_dirSave;
-		m_pWin->Init();
-		app.AddWindow(shared_ptr<O3DUI>(m_pWin));
+		shared_ptr<O3DUI> pWin = make_shared<O3DUI>(this->getName(), m_vWinSize.x, m_vWinSize.y);
+		UIState *pUIstate = pWin->getUIState();
+		pUIstate->m_bSceneCache = m_bSceneCache;
+		pUIstate->m_mouseMode = (visualization::gui::SceneWidget::Controls)m_mouseMode;
+		pUIstate->m_wPanel = m_wPanel;
+		pUIstate->m_sMove = m_vDmove.x;
+		pUIstate->m_dirSave = m_dirSave;
+		pWin->Init();
+		app.AddWindow(pWin);
+		atomic_store(&m_pWin, pWin);
+		if (!m_pTui->bAlive())
+		{
+			pWin->Close();
+			atomic_store(&m_pWin, shared_ptr<O3DUI>());
+			return;
+		}
 
-		m_pWin->UpdateUIstate();
+		pWin->UpdateUIstate();
 		//		m_pWin->SetFullScreen(m_bFullScreen);
 		m_aabb = createDefaultAABB();
 		camBound(m_aabb);
@@ -287,7 +323,9 @@ namespace kai
 
 		m_pT->run();
 		app.Run();
-		exit(0);
+		m_pT->stop();
+		m_pT->join();
+		atomic_store(&m_pWin, shared_ptr<O3DUI>());
 	}
 
 	AxisAlignedBoundingBox _GeometryViewer::createDefaultAABB(void)

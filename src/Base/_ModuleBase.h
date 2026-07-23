@@ -43,6 +43,7 @@ namespace kai
 		virtual void pause(void);
 		virtual void resume(void);
 		virtual void stop(void);
+		virtual bool join(void);
 
 		virtual void atomicFrom(void);
 		virtual void atomicTo(void);

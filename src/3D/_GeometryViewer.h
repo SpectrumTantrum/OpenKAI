@@ -92,7 +92,6 @@ namespace kai
 			if (gt == pc_stream)
 			{
 				addPCstream();
-				adjustNpoints(&m_PC, m_PC.points_.size(), m_nPbuf);
 				m_tPC = t::geometry::PointCloud::FromLegacy(m_PC, core::Dtype::Float32);
 			}
 			else if (gt == pc_grid)
@@ -113,71 +112,22 @@ namespace kai
 		void addPCstream(uint64_t tExpire = 0)
 		{
 			_PCstream *p = (_PCstream *)m_pGB;
+			PCSTREAM_SNAPSHOT_PTR pSnapshot = p->getSnapshot();
 			m_PC.Clear();
+			IF_(!pSnapshot);
 
-			for (int i = 0; i < p->nP(); i++)
+			for (const GEOMETRY_POINT &point : pSnapshot->m_vP)
 			{
-				GEOMETRY_POINT *pP = p->get(i);
-				IF_CONT(pP->m_tStamp < tExpire);
+				IF_CONT(point.m_tStamp < tExpire);
 
-				m_PC.points_.push_back(v2e(pP->m_vP).cast<double>());
-				m_PC.colors_.push_back(v2e(pP->m_vC).cast<double>());
+				m_PC.points_.push_back(v2e(point.m_vP).cast<double>());
+				m_PC.colors_.push_back(v2e(point.m_vC).cast<double>());
 
-				IF_(m_PC.points_.size() >= m_nPbuf);
+				if (m_nPbuf > 0 && m_PC.points_.size() >= (size_t)m_nPbuf)
+					break;
 			}
 		}
 
-		void adjustNpoints(PointCloud *pPC, int nP, int nPbuf)
-		{
-			NULL_(pPC);
-
-			if (nP < nPbuf)
-			{
-				addDummyPoints(pPC, nPbuf - nP, m_rDummyDome);
-			}
-			else if (nP > nPbuf)
-			{
-				int d = nP - nPbuf;
-				pPC->points_.erase(pPC->points_.end() - d, pPC->points_.end());
-				pPC->colors_.erase(pPC->colors_.end() - d, pPC->colors_.end());
-			}
-		}
-
-		void addDummyPoints(PointCloud *pPC, int n, float r, Vector3d vCol = {0, 0, 0})
-		{
-			NULL_(pPC);
-
-			float nV = floor(sqrt((float)n));
-			float nH = ceil(n / nV);
-
-			float dV = OK_PI / nV;
-			float dH = (OK_PI * 2.0) / nH;
-
-			int k = 0;
-			for (int i = 0; i < nH; i++)
-			{
-				float h = dH * i;
-				float sinH = sin(h);
-				float cosH = cos(h);
-
-				for (int j = 0; j < nV; j++)
-				{
-					float v = dV * j;
-					float sinV = sin(v);
-					float cosV = cos(v);
-
-					Vector3d vP(
-						r * sinV * sinH,
-						r * sinV * cosH,
-						r * cosV);
-
-					pPC->points_.push_back(vP);
-					pPC->colors_.push_back(vCol);
-
-					IF_(++k >= n);
-				}
-			}
-		}
 	};
 
 	class _GeometryViewer : public _GeometryBase
@@ -222,8 +172,7 @@ namespace kai
 	protected:
 		vector<GVIEWER_OBJ> m_vGO;
 
-		O3DUI *m_pWin;
-		UIState *m_pUIstate;
+		shared_ptr<O3DUI> m_pWin;
 		_Thread *m_pTui;
 		string m_dirSave;
 

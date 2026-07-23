@@ -18,8 +18,8 @@ namespace kai
 
 	_WebSocket::~_WebSocket()
 	{
-		m_packetR.clear();
 		close();
+		m_packetR.release();
 	}
 
 	bool _WebSocket::init(const json &j)
@@ -27,12 +27,19 @@ namespace kai
 		IF_F(!this->_IObase::init(j));
 
 		int nPacket = 1024;
-		int nPbuffer = 512;
+		int nMessageMax = 1024 * 1024;
+		int nQueueBytesMax = 4 * 1024 * 1024;
 		jKv(j, "nPacket", nPacket);
-		jKv(j, "nPbuffer", nPbuffer);
+		jKv(j, "nMessageMax", nMessageMax);
+		jKv(j, "nQueueBytesMax", nQueueBytesMax);
 
-//		IF_F(!m_packetW.init(nPbuffer, nPacket));
-		IF_F(!m_packetR.init(nPbuffer, nPacket));
+		IF_F(nMessageMax <= 0);
+		IF_F(nQueueBytesMax <= 0);
+
+		IF_F(!m_packetW.init(nMessageMax, nPacket, ioPacket_message,
+							 static_cast<size_t>(nQueueBytesMax)));
+		IF_F(!m_packetR.init(nMessageMax, nPacket, ioPacket_message,
+							 static_cast<size_t>(nQueueBytesMax)));
 
 		return true;
 	}

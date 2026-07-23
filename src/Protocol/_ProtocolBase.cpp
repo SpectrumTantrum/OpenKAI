@@ -15,6 +15,8 @@ namespace kai
 
 	_ProtocolBase::~_ProtocolBase()
 	{
+		stop();
+		join();
 		DEL(m_pTr);
 	}
 
@@ -56,6 +58,21 @@ namespace kai
 		IF_F(!m_pIO->bOpen());
 
 		return this->_ModuleBase::check();
+	}
+
+	void _ProtocolBase::stop(void)
+	{
+		this->_ModuleBase::stop();
+		if (m_pTr)
+			m_pTr->stop();
+	}
+
+	bool _ProtocolBase::join(void)
+	{
+		bool joined = this->_ModuleBase::join();
+		if (m_pTr)
+			joined = m_pTr->join() && joined;
+		return joined;
 	}
 
 	void _ProtocolBase::updateW(void)

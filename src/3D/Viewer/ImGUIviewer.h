@@ -71,6 +71,8 @@ namespace kai
 		virtual bool link(const json &j, ModuleMgr *pM);
 		virtual bool start(void);
 		virtual bool check(void);
+		virtual void stop(void) override;
+		virtual bool join(void) override;
 
 		virtual void resetCamPose(void);
 		virtual void setCamPose(const IMGUI_VIEWER_CAM &camPose);

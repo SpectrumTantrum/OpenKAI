@@ -83,24 +83,23 @@ namespace kai
 	void IMGUI_VIEWER_OBJ::addPCstream(const uint64_t tExpire)
 	{
 		_PCstream *p = (_PCstream *)m_pGB;
+		PCSTREAM_SNAPSHOT_PTR pSnapshot = p->getSnapshot();
 		m_vP.clear();
+		if (!pSnapshot)
+			return;
 
-		int nP = p->nP();
-		if (m_nPbuf > 0)
-			nP = std::min(nP, m_nPbuf);
-
-		for (int i = 0; i < nP; i++)
+		for (const GEOMETRY_POINT &point : pSnapshot->m_vP)
 		{
-			GEOMETRY_POINT *pP = p->get(i);
-			if (!pP)
-				continue;
-			if (tExpire > 0 && pP->m_tStamp < tExpire)
+			if (tExpire > 0 && point.m_tStamp < tExpire)
 				continue;
 
 			IMGUI_VIEWER_POINT vp;
-			vp.m_vP = pP->m_vP;
-			vp.m_vC = pP->m_vC;
+			vp.m_vP = point.m_vP;
+			vp.m_vC = point.m_vC;
 			m_vP.push_back(vp);
+
+			if (m_nPbuf > 0 && m_vP.size() >= (size_t)m_nPbuf)
+				break;
 		}
 	}
 
@@ -153,7 +152,10 @@ namespace kai
 
 	ImGUIviewer::~ImGUIviewer()
 	{
+		stop();
+		join();
 		DEL(m_pBackend);
+		DEL(m_pTui);
 		pthread_mutex_destroy(&m_snapshotMutex);
 	}
 
@@ -238,6 +240,21 @@ namespace kai
 		return this->_GeometryBase::check();
 	}
 
+	void ImGUIviewer::stop(void)
+	{
+		this->_GeometryBase::stop();
+		if (m_pTui)
+			m_pTui->stop();
+	}
+
+	bool ImGUIviewer::join(void)
+	{
+		bool joined = this->_GeometryBase::join();
+		if (m_pTui)
+			joined = m_pTui->join() && joined;
+		return joined;
+	}
+
 	void ImGUIviewer::update(void)
 	{
 		m_pT->sleepT(USEC_1SEC);
@@ -277,7 +294,8 @@ namespace kai
 		}
 
 		m_pBackend->shutdown();
-		exit(0);
+		if (m_pT)
+			m_pT->stop();
 	}
 
 	void ImGUIviewer::drawUI(void)

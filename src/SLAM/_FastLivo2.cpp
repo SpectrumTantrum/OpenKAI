@@ -142,29 +142,29 @@ namespace kai
 
 		// point cloud
 		LidarScan LS;
-		int nPring = m_pPCin->nP();
+		vector<GEOMETRY_POINT> pointRing;
+		m_pPCin->copyRingTo(&pointRing);
+		int nPring = (int)pointRing.size();
 		int nP = 0;
-		GEOMETRY_POINT *pGp;
 
-		while (pGp = m_pPCin->get(m_iP))
+		while (m_iP >= 0 && m_iP < nPring)
 		{
-			if (!pGp)
-				break;
-			if (pGp->m_tStamp < m_tStampP)
+			const GEOMETRY_POINT &gp = pointRing[m_iP];
+			if (gp.m_tStamp < m_tStampP)
 				break;
 			if (nP >= m_nPmax)
 				break;
 
 			LidarPoint lp;
-			lp.x = pGp->m_vP.x;
-			lp.y = pGp->m_vP.y;
-			lp.z = pGp->m_vP.z;
+			lp.x = gp.m_vP.x;
+			lp.y = gp.m_vP.y;
+			lp.z = gp.m_vP.z;
 			lp.intensity = 1.0f;
 			lp.tag = 0;
-			lp.t = (double)pGp->m_tStamp * m_tScalePC;
+			lp.t = (double)gp.m_tStamp * m_tScalePC;
 			LS.pts.push_back(lp);
 
-			m_tStampP = pGp->m_tStamp;
+			m_tStampP = gp.m_tStamp;
 			m_iP = iRing(m_iP, nPring);
 			nP++;
 		}

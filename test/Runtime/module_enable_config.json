@@ -1,0 +1,21 @@
+{
+  "disabledBoolean": {
+    "class": "_Console",
+    "bON": false
+  },
+  "disabledInteger": {
+    "class": "_Console",
+    "bON": 0
+  },
+  "enabledBoolean": {
+    "class": "_Console",
+    "bON": true
+  },
+  "enabledInteger": {
+    "class": "_Console",
+    "bON": 1
+  },
+  "enabledDefault": {
+    "class": "_Console"
+  }
+}

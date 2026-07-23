@@ -1,11 +1,12 @@
 cmake_minimum_required(VERSION 3.18)
-project(OpenKAI VERSION 0.0.1)
+project(OpenKAI VERSION 0.1.0)
 set(CMAKE_BUILD_TYPE "Debug" CACHE STRING "")
 
 list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 
 option(BUILD_AS_LIB "Build as library" OFF)
 option(BUILD_SHARED_LIBS "Build shared library" ON)
+option(BUILD_TESTING "Build regression tests" OFF)
 
 option(USE_CUDA "Use NVIDIA CUDA" OFF)
 option(USE_CHILITAGS "Use Chilitags" OFF)
@@ -821,6 +822,61 @@ endif() # build_as_lib
 
 target_link_libraries(OpenKAI ${OpenKAI_lib})
 
+if(BUILD_TESTING)
+  enable_testing()
+
+  if(BUILD_AS_LIB)
+    add_executable(OpenKAI_module_manager_config_test
+      test/Runtime/module_manager_config_test.cpp
+    )
+    target_link_libraries(OpenKAI_module_manager_config_test PRIVATE OpenKAI)
+    add_test(
+      NAME OpenKAI_module_manager_config_test
+      COMMAND OpenKAI_module_manager_config_test
+        ${CMAKE_CURRENT_SOURCE_DIR}/test/Runtime/module_enable_config.json
+    )
+  else()
+    message(STATUS "Skipping module-manager config test (requires BUILD_AS_LIB)")
+  endif()
+
+  if(BUILD_AS_LIB AND WITH_IO AND USE_WSSERVER)
+  add_executable(OpenKAI_websocket_message_test
+    test/IO/websocket_message_server_test.cpp
+  )
+  target_link_libraries(OpenKAI_websocket_message_test PRIVATE OpenKAI)
+
+  find_program(NODE_EXECUTABLE node REQUIRED)
+  add_test(
+    NAME OpenKAI_websocket_message_test
+    COMMAND
+      ${NODE_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/IO/websocket_message_test.mjs
+      $<TARGET_FILE:OpenKAI_websocket_message_test>
+  )
+  set_tests_properties(OpenKAI_websocket_message_test PROPERTIES TIMEOUT 20)
+  else()
+    message(STATUS "Skipping WebSocket regression test (requires BUILD_AS_LIB, WITH_IO, and USE_WSSERVER)")
+  endif()
+
+  if(BUILD_AS_LIB AND WITH_3D AND USE_OPEN3D)
+  add_executable(OpenKAI_runtime_concurrency_test
+    test/Runtime/runtime_concurrency_test.cpp
+  )
+  target_link_libraries(OpenKAI_runtime_concurrency_test
+    PRIVATE
+      OpenKAI
+      pthread
+  )
+  add_test(
+    NAME OpenKAI_runtime_concurrency_test
+    COMMAND OpenKAI_runtime_concurrency_test
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/Runtime/module_cleanup_config.json
+  )
+  else()
+    message(STATUS "Skipping runtime concurrency test (requires BUILD_AS_LIB, WITH_3D, and USE_OPEN3D)")
+  endif()
+endif()
+
 # Optional ROS2 configs
 if(USE_ROS)
   find_package(ament_cmake REQUIRED)
@@ -834,9 +890,11 @@ if(USE_ROS)
 endif()
 
 # Install
+
 include(GNUInstallDirs)
 set_target_properties(OpenKAI PROPERTIES
-  VERSION ${PROJECT_VERSION})
+  VERSION ${PROJECT_VERSION}
+  SOVERSION 0.1)
 
 install(TARGETS OpenKAI
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
@@ -846,3 +904,10 @@ install(DIRECTORY ${CMAKE_SOURCE_DIR}/src/
   FILES_MATCHING
   PATTERN "*.h"
 )
+
+configure_file(
+  cmake/InstallOpenKAIBuildInfo.cmake.in
+  "${CMAKE_CURRENT_BINARY_DIR}/InstallOpenKAIBuildInfo.cmake"
+  @ONLY
+)
+install(SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/InstallOpenKAIBuildInfo.cmake")

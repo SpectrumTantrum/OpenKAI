@@ -1,0 +1,9 @@
+{
+  "lifecycleProbe": {
+    "name": "lifecycleProbe",
+    "class": "LifecycleProbe",
+    "thread": {
+      "FPS": 1000.0
+    }
+  }
+}

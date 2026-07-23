@@ -149,16 +149,13 @@ namespace kai
 		IF_(mIn.channels() != 3)
 
 		m_vCsize.set(mIn.cols, mIn.rows);
-		int nPring = m_pPCin->nP();
-		int iP = 0;
-		GEOMETRY_POINT *pGp;
+		PCSTREAM_SNAPSHOT_PTR pSnapshot = m_pPCin->getSnapshot();
+		NULL_(pSnapshot);
 
-		while (pGp = m_pPCin->get(iP++))
+		for (const GEOMETRY_POINT &gp : pSnapshot->m_vP)
 		{
-			NULL_(pGp);
-
-			vFloat3 vP = pGp->m_vP;
 			//			vFloat3 vP(-vPin.y, -vPin.z, vPin.x); // mid360 to cam
+			vFloat3 vP = gp.m_vP;
 
 			vInt2 vPimg;
 			IF_CONT(!L2C(m_vCsize, vP, vPimg));

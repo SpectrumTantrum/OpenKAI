@@ -16,17 +16,195 @@ namespace open3d
             }
 
             O3DUI::O3DUI(const string &title, int width, int height)
-                : Window(title, width, height)
+                : Window(title, width, height), m_bClosing(false)
             {
             }
 
-            O3DUI::~O3DUI() {}
+            O3DUI::~O3DUI()
+            {
+                beginClose();
+            }
 
             void O3DUI::Init(void)
             {
                 m_pScene = new SceneWidget();
                 m_pScene->SetScene(make_shared<Open3DScene>(GetRenderer()));
                 AddChild(GiveOwnership(m_pScene));
+
+                SetOnTickEvent([this]()
+                               { return flushPending(); });
+                SetOnClose([this]()
+                           {
+                               beginClose();
+                               return true;
+                           });
+            }
+
+            void O3DUI::RequestClose(void)
+            {
+                queueAction("9.window.close", [this]()
+                            { Close(); });
+            }
+
+            bool O3DUI::bClosing(void) const
+            {
+                return m_bClosing.load();
+            }
+
+            void O3DUI::beginClose(void)
+            {
+                if (m_bClosing.exchange(true))
+                    return;
+
+                lock_guard<mutex> lock(m_pendingMutex);
+                m_pendingGeometry.clear();
+                m_pendingActions.clear();
+            }
+
+            void O3DUI::queueGeometry(const string &name, PENDING_GEOMETRY &&geometry)
+            {
+                if (m_bClosing.load())
+                    return;
+
+                lock_guard<mutex> lock(m_pendingMutex);
+                if (m_bClosing.load())
+                    return;
+
+                auto pending = m_pendingGeometry.find(name);
+                if (!geometry.m_bAdd && pending != m_pendingGeometry.end() &&
+                    pending->second.m_type == geometry.m_type && pending->second.m_bAdd)
+                {
+                    geometry.m_bAdd = true;
+                    geometry.m_bVisible = pending->second.m_bVisible;
+                    geometry.m_bHasMaterial = pending->second.m_bHasMaterial;
+                    geometry.m_material = pending->second.m_material;
+                }
+
+                m_pendingGeometry[name] = std::move(geometry);
+            }
+
+            void O3DUI::queueAction(const string &name, function<void()> action)
+            {
+                if (m_bClosing.load())
+                    return;
+
+                lock_guard<mutex> lock(m_pendingMutex);
+                if (!m_bClosing.load())
+                    m_pendingActions[name] = std::move(action);
+            }
+
+            bool O3DUI::flushPending(void)
+            {
+                if (m_bClosing.load())
+                    return false;
+
+                unordered_map<string, PENDING_GEOMETRY> pendingGeometry;
+                std::map<string, function<void()>> pendingActions;
+                {
+                    lock_guard<mutex> lock(m_pendingMutex);
+                    pendingGeometry.swap(m_pendingGeometry);
+                    pendingActions.swap(m_pendingActions);
+                }
+
+                for (auto &pending : pendingGeometry)
+                    applyGeometry(pending.first, pending.second);
+
+                for (auto &pending : pendingActions)
+                {
+                    if (m_bClosing.load())
+                        break;
+                    pending.second();
+                }
+
+                bool bChanged = !pendingGeometry.empty() || !pendingActions.empty();
+                if (bChanged && !m_bClosing.load() && m_pScene)
+                    m_pScene->ForceRedraw();
+
+                return bChanged;
+            }
+
+            void O3DUI::applyGeometry(const string &name, PENDING_GEOMETRY &geometry)
+            {
+                if (!m_pScene || m_bClosing.load())
+                    return;
+
+                auto pScene = m_pScene->GetScene();
+                bool bExists = pScene->HasGeometry(name);
+
+                if (geometry.m_type == PENDING_GEOMETRY_TYPE::remove)
+                {
+                    if (bExists)
+                        pScene->RemoveGeometry(name);
+                    m_livePointClouds.erase(name);
+                    m_liveMeshes.erase(name);
+                    m_liveLineSets.erase(name);
+                    m_liveMaterials.erase(name);
+                    m_livePointCounts.erase(name);
+                    return;
+                }
+
+                if (geometry.m_bHasMaterial)
+                    m_liveMaterials[name] = geometry.m_material;
+                auto material = m_liveMaterials.find(name);
+                if (material == m_liveMaterials.end())
+                    return;
+
+                if (geometry.m_type == PENDING_GEOMETRY_TYPE::pointCloud)
+                {
+                    if (!geometry.m_pPointCloud || geometry.m_pPointCloud->IsEmpty())
+                    {
+                        if (bExists)
+                            pScene->RemoveGeometry(name);
+                        m_livePointClouds.erase(name);
+                        m_livePointCounts.erase(name);
+                        return;
+                    }
+
+                    size_t nPoints = (size_t)geometry.m_pPointCloud->GetPointPositions().GetLength();
+                    bool bRecreate = geometry.m_bAdd || !bExists ||
+                                     m_livePointCounts[name] != nPoints;
+                    if (bRecreate)
+                    {
+                        if (bExists)
+                            pScene->RemoveGeometry(name);
+                        m_livePointClouds[name] = geometry.m_pPointCloud;
+                        pScene->AddGeometry(name, m_livePointClouds[name].get(), material->second, false);
+                        pScene->GetScene()->GeometryShadows(name, false, false);
+                        pScene->ShowGeometry(name, geometry.m_bVisible);
+                    }
+                    else
+                    {
+                        pScene->GetScene()->UpdateGeometry(
+                            name,
+                            *geometry.m_pPointCloud,
+                            rendering::Scene::kUpdatePointsFlag |
+                                rendering::Scene::kUpdateColorsFlag);
+                        m_livePointClouds[name] = geometry.m_pPointCloud;
+                    }
+                    m_livePointCounts[name] = nPoints;
+                    return;
+                }
+
+                if (bExists)
+                    pScene->RemoveGeometry(name);
+
+                if (geometry.m_type == PENDING_GEOMETRY_TYPE::mesh)
+                {
+                    if (!geometry.m_pMesh || geometry.m_pMesh->IsEmpty())
+                        return;
+                    m_liveMeshes[name] = geometry.m_pMesh;
+                    pScene->AddGeometry(name, m_liveMeshes[name].get(), material->second, false);
+                }
+                else if (geometry.m_type == PENDING_GEOMETRY_TYPE::lineSet)
+                {
+                    if (!geometry.m_pLineSet || geometry.m_pLineSet->IsEmpty())
+                        return;
+                    m_liveLineSets[name] = geometry.m_pLineSet;
+                    pScene->AddGeometry(name, m_liveLineSets[name].get(), material->second);
+                }
+
+                pScene->GetScene()->GeometryShadows(name, false, false);
+                pScene->ShowGeometry(name, geometry.m_bVisible);
             }
 
             void O3DUI::AddPointCloud(const string &name,
@@ -37,18 +215,14 @@ namespace open3d
                 NULL_(pTpc);
                 NULL_(pMaterial);
 
-                MaterialRecord mr;
-                pMaterial->ToMaterialRecord(mr);
-
-                auto scene = m_pScene->GetScene();
-                scene->AddGeometry(name, pTpc, mr, false);
-
-                scene->GetScene()->GeometryShadows(name, false, false);
-                scene->ShowGeometry(name, bVisible);
-
-                // SetPointSize(m_uiState.m_sPoint);
-                // SetLineWidth(m_uiState.m_wLine);
-                m_pScene->ForceRedraw();
+                PENDING_GEOMETRY geometry;
+                geometry.m_type = PENDING_GEOMETRY_TYPE::pointCloud;
+                geometry.m_pPointCloud = make_shared<t::geometry::PointCloud>(pTpc->Clone());
+                pMaterial->ToMaterialRecord(geometry.m_material);
+                geometry.m_bHasMaterial = true;
+                geometry.m_bAdd = true;
+                geometry.m_bVisible = bVisible;
+                queueGeometry(name, std::move(geometry));
             }
 
             void O3DUI::UpdatePointCloud(const string &name,
@@ -56,16 +230,10 @@ namespace open3d
             {
                 NULL_(pTpc);
 
-                gui::Application::GetInstance().PostToMainThread(
-                    this, [this, name, pTpc]()
-                    {
-                        m_pScene->GetScene()->GetScene()->UpdateGeometry(
-                            name,
-                            *pTpc,
-                            open3d::visualization::rendering::Scene::kUpdatePointsFlag |
-                                open3d::visualization::rendering::Scene::kUpdateColorsFlag);
-
-                        m_pScene->ForceRedraw(); });
+                PENDING_GEOMETRY geometry;
+                geometry.m_type = PENDING_GEOMETRY_TYPE::pointCloud;
+                geometry.m_pPointCloud = make_shared<t::geometry::PointCloud>(pTpc->Clone());
+                queueGeometry(name, std::move(geometry));
             }
 
             void O3DUI::AddMesh(const string &name,
@@ -76,18 +244,14 @@ namespace open3d
                 NULL_(pTmesh);
                 NULL_(pMaterial);
 
-                // mat.SetPointSize(ConvertToScaledPixels(m_uiState.m_sPoint));
-                MaterialRecord mr;
-                pMaterial->ToMaterialRecord(mr);
-
-                auto scene = m_pScene->GetScene();
-                scene->AddGeometry(name, pTmesh, mr, false);
-                scene->GetScene()->GeometryShadows(name, false, false);
-                scene->ShowGeometry(name, bVisible);
-
-                // SetPointSize(m_uiState.m_sPoint);
-                // SetLineWidth(m_uiState.m_wLine);
-                m_pScene->ForceRedraw();
+                PENDING_GEOMETRY geometry;
+                geometry.m_type = PENDING_GEOMETRY_TYPE::mesh;
+                geometry.m_pMesh = make_shared<t::geometry::TriangleMesh>(pTmesh->Clone());
+                pMaterial->ToMaterialRecord(geometry.m_material);
+                geometry.m_bHasMaterial = true;
+                geometry.m_bAdd = true;
+                geometry.m_bVisible = bVisible;
+                queueGeometry(name, std::move(geometry));
             }
 
             void O3DUI::UpdateMesh(const string &name,
@@ -97,17 +261,12 @@ namespace open3d
                 NULL_(pTmesh);
                 NULL_(pMaterial);
 
-                // gui::Application::GetInstance().PostToMainThread(
-                //     this, [this, name, pTmesh]()
-                //     {
-                //         m_pScene->GetScene()->GetScene()->UpdateGeometry(
-                //             name,
-                //             *pTmesh,
-                //             open3d::visualization::rendering::Scene::kUpdatePointsFlag |
-                //                 open3d::visualization::rendering::Scene::kUpdateColorsFlag);
-
-                //         m_pScene->ForceRedraw();
-                //     });
+                PENDING_GEOMETRY geometry;
+                geometry.m_type = PENDING_GEOMETRY_TYPE::mesh;
+                geometry.m_pMesh = make_shared<t::geometry::TriangleMesh>(pTmesh->Clone());
+                pMaterial->ToMaterialRecord(geometry.m_material);
+                geometry.m_bHasMaterial = true;
+                queueGeometry(name, std::move(geometry));
             }
 
             void O3DUI::AddLineSet(const string &name,
@@ -118,17 +277,14 @@ namespace open3d
                 NULL_(pLS);
                 NULL_(pMaterial);
 
-                // mat.SetLineWidth(m_uiState.m_wLine * GetScaling());
-                MaterialRecord mr;
-                pMaterial->ToMaterialRecord(mr);
-
-                // TODO: atomic?
-                auto scene = m_pScene->GetScene();
-                scene->AddGeometry(name, pLS, mr);
-                scene->GetScene()->GeometryShadows(name, false, false);
-                scene->ShowGeometry(name, bVisible);
-
-                m_pScene->ForceRedraw();
+                PENDING_GEOMETRY geometry;
+                geometry.m_type = PENDING_GEOMETRY_TYPE::lineSet;
+                geometry.m_pLineSet = make_shared<geometry::LineSet>(*pLS);
+                pMaterial->ToMaterialRecord(geometry.m_material);
+                geometry.m_bHasMaterial = true;
+                geometry.m_bAdd = true;
+                geometry.m_bVisible = bVisible;
+                queueGeometry(name, std::move(geometry));
             }
 
             void O3DUI::UpdateLineSet(const string &name,
@@ -138,29 +294,19 @@ namespace open3d
                 NULL_(pLS);
                 NULL_(pMaterial);
 
-                gui::Application::GetInstance().PostToMainThread(
-                    this, [this, name, pLS, pMaterial]()
-                    {
-                        auto pS = m_pScene->GetScene();
-                        pS->GetScene()->RemoveGeometry(name);
-
-                        LineSet ls = *pLS;
-                        IF_(ls.IsEmpty());
-
-                        MaterialRecord mr;
-                        pMaterial->ToMaterialRecord(mr);
-                        pS->AddGeometry(name, pLS, mr);
-
-                        pS->GetScene()->GeometryShadows(name, false, false);
-                        pS->ShowGeometry(name, true);
-
-                        m_pScene->ForceRedraw(); });
+                PENDING_GEOMETRY geometry;
+                geometry.m_type = PENDING_GEOMETRY_TYPE::lineSet;
+                geometry.m_pLineSet = make_shared<geometry::LineSet>(*pLS);
+                pMaterial->ToMaterialRecord(geometry.m_material);
+                geometry.m_bHasMaterial = true;
+                queueGeometry(name, std::move(geometry));
             }
 
             void O3DUI::RemoveGeometry(const string &name)
             {
-                m_pScene->GetScene()->RemoveGeometry(name);
-                m_pScene->ForceRedraw();
+                PENDING_GEOMETRY geometry;
+                geometry.m_type = PENDING_GEOMETRY_TYPE::remove;
+                queueGeometry(name, std::move(geometry));
             }
 
             void O3DUI::CamSetProj(
@@ -169,15 +315,17 @@ namespace open3d
                 double far,
                 uint8_t fov_type)
             {
-                auto f = m_pScene->GetFrame();
-                auto sCam = m_pScene->GetScene()->GetCamera();
-                sCam->SetProjection(
-                    fov,
-                    float(f.width) / float(f.height),
-                    near,
-                    far,
-                    (fov_type == 0) ? Camera::FovType::Horizontal : Camera::FovType::Vertical);
-                m_pScene->ForceRedraw();
+                queueAction("1.camera.projection", [this, fov, near, far, fov_type]()
+                            {
+                                auto f = m_pScene->GetFrame();
+                                auto sCam = m_pScene->GetScene()->GetCamera();
+                                sCam->SetProjection(
+                                    fov,
+                                    float(f.width) / float(f.height),
+                                    near,
+                                    far,
+                                    (fov_type == 0) ? Camera::FovType::Horizontal : Camera::FovType::Vertical);
+                            });
             }
 
             void O3DUI::CamSetProj(
@@ -189,19 +337,18 @@ namespace open3d
                 double near,
                 double far)
             {
-                auto f = m_pScene->GetFrame();
-                auto sCam = m_pScene->GetScene()->GetCamera();
-
-                sCam->SetProjection(
-                    projType,
-                    left,
-                    right,
-                    bottom,
-                    top,
-                    near,
-                    far);
-
-                m_pScene->ForceRedraw();
+                queueAction("1.camera.projection", [this, projType, left, right, bottom, top, near, far]()
+                            {
+                                auto sCam = m_pScene->GetScene()->GetCamera();
+                                sCam->SetProjection(
+                                    projType,
+                                    left,
+                                    right,
+                                    bottom,
+                                    top,
+                                    near,
+                                    far);
+                            });
             }
 
             void O3DUI::CamSetPose(
@@ -209,28 +356,35 @@ namespace open3d
                 const Vector3f &eye,
                 const Vector3f &up)
             {
-                auto sCam = m_pScene->GetScene()->GetCamera();
-                sCam->LookAt(center, eye, up);
-                m_pScene->ForceRedraw();
+                queueAction("2.camera.pose", [this, center, eye, up]()
+                            {
+                                auto sCam = m_pScene->GetScene()->GetCamera();
+                                sCam->LookAt(center, eye, up);
+                            });
             }
 
             void O3DUI::CamAutoBound(const geometry::AxisAlignedBoundingBox &aabb,
                                      const Vector3f &CoR)
             {
-                m_pScene->SetupCamera(m_pScene->GetScene()->GetCamera()->GetFieldOfView(),
-                                      aabb,
-                                      CoR);
-                m_pScene->ForceRedraw();
+                queueAction("0.camera.bound", [this, aabb, CoR]()
+                            {
+                                m_pScene->SetupCamera(
+                                    m_pScene->GetScene()->GetCamera()->GetFieldOfView(),
+                                    aabb,
+                                    CoR);
+                            });
             }
 
             void O3DUI::camMove(Vector3f vM)
             {
-                auto pC = m_pScene->GetScene()->GetCamera();
-                auto mm = pC->GetModelMatrix();
-                vM *= m_uiState.m_sMove;
-                mm.translate(vM);
-                pC->SetModelMatrix(mm);
-                m_pScene->ForceRedraw();
+                queueAction("3.camera.move", [this, vM]() mutable
+                            {
+                                auto pC = m_pScene->GetScene()->GetCamera();
+                                auto mm = pC->GetModelMatrix();
+                                vM *= m_uiState.m_sMove;
+                                mm.translate(vM);
+                                pC->SetModelMatrix(mm);
+                            });
             }
 
             UIState *O3DUI::getUIState(void)

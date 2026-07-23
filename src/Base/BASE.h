@@ -30,6 +30,7 @@ namespace kai
 		virtual void pause(void);
 		virtual void resume(void);
 		virtual void stop(void);
+		virtual bool join(void);
 
 		virtual void draw(void *pFrame);
 		virtual void console(void *pConsole);

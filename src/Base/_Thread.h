@@ -10,6 +10,8 @@
 
 #include "BASE.h"
 
+#include <atomic>
+
 namespace kai
 {
 	enum THREAD_STATE
@@ -29,7 +31,8 @@ namespace kai
 
 		virtual bool init(const json &j);
 		virtual bool link(const json &j, ModuleMgr *pM);
-		virtual bool startThread(void *(*__start_routine)(void *), void *__restrict __arg);
+		virtual bool startThread(void *(*__start_routine)(void *), void *__arg);
+		virtual bool join(void);
 		virtual void console(void *pConsole);
 
 		bool bAlive(void);
@@ -55,14 +58,29 @@ namespace kai
 		uint64_t getTfrom(void);
 		uint64_t getTto(void);
 
+	private:
+		struct THREAD_START_CONTEXT
+		{
+			_Thread *m_pThread;
+			void *(*m_pRoutine)(void *);
+			void *m_pArg;
+		};
+
+		static void *threadEntry(void *pContext);
+		void finishThread(void);
+		void wake(void);
+
 	protected:
 		pthread_t m_threadID;
+		pthread_mutex_t m_lifecycleMutex;
 		pthread_mutex_t m_wakeupMutex;
 		pthread_cond_t m_wakeupSignal;
+		uint64_t m_wakeupGeneration;
+		bool m_bJoining;
 
-		THREAD_STATE m_setState;
-		THREAD_STATE m_state;
-		bool m_bPaused;
+		atomic<THREAD_STATE> m_setState;
+		atomic<THREAD_STATE> m_state;
+		atomic<bool> m_bPaused;
 
 		uint64_t m_tFrom;
 		uint64_t m_tTo;
@@ -70,7 +88,7 @@ namespace kai
 		float m_targetTframe;
 		float m_dT;
 		float m_FPS;
-		bool m_bSkipSleep;
+		atomic<bool> m_bSkipSleep;
 
 		// linked
 		vector<_Thread *> m_vRunThread;

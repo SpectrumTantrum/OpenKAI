@@ -12,13 +12,15 @@
 
 namespace kai
 {
+	struct wsServerCallbackContext;
+
 	struct wsClient
 	{
-		_WebSocket *m_pWS;
+		shared_ptr<_WebSocket> m_pWS;
 		ws_cli_conn_t m_wsConn;
 		uint64_t m_tStamp;
 
-		bool init(_WebSocket* pWS)
+		bool init(const shared_ptr<_WebSocket> &pWS)
 		{
 			NULL_F(pWS);
 
@@ -27,12 +29,12 @@ namespace kai
 			return true;
 		}
 
-		void setWS(_WebSocket *pWS)
+		void setWS(const shared_ptr<_WebSocket> &pWS)
 		{
 			m_pWS = pWS;
 		}
 
-		_WebSocket *getWS(void)
+		shared_ptr<_WebSocket> getWS(void)
 		{
 			return m_pWS;
 		}
@@ -62,7 +64,7 @@ namespace kai
 		int read(uint8_t *pBuf, int nB);
 
 		int nClient(void);
-		_WebSocket* getClient(int i);
+		shared_ptr<_WebSocket> getClientShared(int i);
 
 		static void sCbOpen(ws_cli_conn_t client);
 		static void sCbClose(ws_cli_conn_t client);
@@ -73,10 +75,10 @@ namespace kai
 		void cbClose(ws_cli_conn_t client);
 		void cbMessage(ws_cli_conn_t client, const unsigned char *msg, uint64_t size, int type);
 
-		wsClient* findWSclient(ws_cli_conn_t wsCli);
-		int findWSclientIdx(ws_cli_conn_t wsCli);
-		wsClient *getWSclient(int i);
-		void delWSclient(int i);
+		shared_ptr<wsClient> findWSclient(ws_cli_conn_t wsCli);
+		shared_ptr<wsClient> getWSclient(int i);
+		shared_ptr<wsClient> removeWSclient(ws_cli_conn_t wsCli);
+		vector<shared_ptr<wsClient>> getClientSnapshot(void);
 //		wsClient *findClient(const string& addr, const string& port);
 
 		void updateW(void);
@@ -94,14 +96,19 @@ namespace kai
 		}
 
 	protected:
-		vector<wsClient> m_vClient;
+		vector<shared_ptr<wsClient>> m_vClient;
+		pthread_mutex_t m_clientMutex;
 		int m_nClientMax;
+		int m_nPacket;
+		int m_nMessageMax;
+		int m_nQueueBytesMax;
 		WSSOCKET_MODE m_wsMode;
 
 		string m_host;
 		uint16_t m_port;
 		uint32_t m_tOutMs;
 
+		wsServerCallbackContext *m_pCallbackContext;
 		_Thread *m_pTr;
 	};
 

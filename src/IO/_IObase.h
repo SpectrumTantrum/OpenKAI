@@ -11,6 +11,8 @@
 #include "../Base/_ModuleBase.h"
 #include "../UI/_Console.h"
 
+#include <atomic>
+
 #define IO_BUF_N 2000
 
 namespace kai
@@ -31,6 +33,12 @@ namespace kai
 		io_unknown,
 		io_closed,
 		io_opened
+	};
+
+	enum IO_PACKET_FIFO_MODE
+	{
+		ioPacket_chunk,
+		ioPacket_message
 	};
 
 	struct IO_PACKET
@@ -68,91 +76,41 @@ namespace kai
 
 	struct IO_PACKET_FIFO
 	{
-		IO_PACKET *m_pP = NULL;
-		int m_nP;
-		int m_iPset;
-		int m_iPget;
+		IO_PACKET_FIFO();
+		~IO_PACKET_FIFO();
+
+		IO_PACKET_FIFO(const IO_PACKET_FIFO &) = delete;
+		IO_PACKET_FIFO &operator=(const IO_PACKET_FIFO &) = delete;
+
+		bool init(int nB, int nP,
+				  IO_PACKET_FIFO_MODE mode = ioPacket_chunk,
+				  size_t nBqueuedMax = 0);
+		void release(void);
+		void clear(void);
+
+		bool setPacket(const uint8_t *pB, int nB);
+		int getPacket(uint8_t *pB, int nB);
+		bool getPacket(vector<uint8_t> *pB);
+
+		size_t nQueued(void);
+		size_t nBytesQueued(void);
+		uint64_t nDropped(void);
+
+		// Retained for console/source compatibility. Access through the
+		// synchronized methods above when a consistent value is required.
+		int m_nP = 0;
+		int m_iPset = 0;
+		int m_iPget = 0;
+
+	private:
+		deque<vector<uint8_t>> m_qP;
+		int m_nB = 0;
+		size_t m_nBqueued = 0;
+		size_t m_nBqueuedMax = 0;
+		uint64_t m_nDropped = 0;
+		IO_PACKET_FIFO_MODE m_mode = ioPacket_chunk;
+		bool m_bInit = false;
 		pthread_mutex_t m_mutex;
-
-		bool init(int nB, int nP)
-		{
-			m_pP = new IO_PACKET[nP];
-			NULL_F(m_pP);
-			m_nP = nP;
-
-			pthread_mutex_init(&m_mutex, NULL);
-
-			int iP;
-			for (iP = 0; iP < m_nP; iP++)
-			{
-				if (!m_pP[iP].init(nB))
-					break;
-			}
-
-			if (iP < nP)
-			{
-				release();
-				return false;
-			}
-
-			clear();
-			return true;
-		}
-
-		void release(void)
-		{
-			clear();
-
-			for (int i = 0; i < m_nP; i++)
-			{
-				m_pP[i].release();
-			}
-
-			DEL(m_pP);
-			pthread_mutex_destroy(&m_mutex);
-		}
-
-		void clear(void)
-		{
-			m_iPset = 0;
-			m_iPget = 0;
-		}
-
-		void setPacket(uint8_t *pB, int nB)
-		{
-			NULL_(pB);
-
-			pthread_mutex_lock(&m_mutex);
-
-			int nBw = 0;
-			while (nBw < nB)
-			{
-				IO_PACKET *pP = &m_pP[m_iPset];
-				nBw += pP->set(&pB[nBw], nB - nBw);
-
-				if (m_iPset == m_nP - 1)
-					m_iPset = 0;
-				else
-					m_iPset++;
-			}
-
-			pthread_mutex_unlock(&m_mutex);
-		}
-
-		int getPacket(uint8_t *pB, int nB)
-		{
-			IF__(m_iPget == m_iPset, 0);
-
-			IO_PACKET *pP = &m_pP[m_iPget++];
-			if (m_iPget >= m_nP)
-				m_iPget = 0;
-
-			if (pP->m_nBw > nB)
-				return -1;
-
-			memcpy(pB, pP->m_pB, pP->m_nBw);
-			return pP->m_nBw;
-		}
 	};
 
 	class _IObase : public _ModuleBase
@@ -180,7 +138,7 @@ namespace kai
 
 	protected:
 		IO_TYPE m_ioType;
-		IO_STATUS m_ioStatus;
+		atomic<IO_STATUS> m_ioStatus;
 
 		IO_PACKET_FIFO m_packetW;
 	};

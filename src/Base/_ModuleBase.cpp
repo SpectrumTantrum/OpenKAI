@@ -122,9 +122,15 @@ namespace kai
 
     void _ModuleBase::stop(void)
     {
-        IF_(!check());
+        if (m_pT)
+            m_pT->stop();
+    }
 
-        m_pT->stop();
+    bool _ModuleBase::join(void)
+    {
+        if (!m_pT)
+            return true;
+        return m_pT->join();
     }
 
     void _ModuleBase::atomicFrom(void)

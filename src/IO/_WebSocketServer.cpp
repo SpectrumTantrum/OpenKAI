@@ -7,25 +7,127 @@
 
 #include "_WebSocketServer.h"
 
+#include <limits>
+
 namespace kai
 {
-	static _WebSocketServer *g_pWSserver = NULL;
+	struct wsServerCallbackContext
+	{
+		pthread_mutex_t m_mutex;
+		pthread_cond_t m_idle;
+		_WebSocketServer *m_pServer;
+		size_t m_nActive;
+		bool m_bStopping;
+	};
+
+	namespace
+	{
+		_WebSocketServer *acquireServer(ws_cli_conn_t client,
+										 wsServerCallbackContext **ppContext)
+		{
+			wsServerCallbackContext *pContext =
+				static_cast<wsServerCallbackContext *>(ws_get_server_context(client));
+			if (!pContext)
+				return nullptr;
+
+			pthread_mutex_lock(&pContext->m_mutex);
+			if (pContext->m_bStopping || !pContext->m_pServer)
+			{
+				pthread_mutex_unlock(&pContext->m_mutex);
+				return nullptr;
+			}
+
+			++pContext->m_nActive;
+			_WebSocketServer *pServer = pContext->m_pServer;
+			pthread_mutex_unlock(&pContext->m_mutex);
+			*ppContext = pContext;
+			return pServer;
+		}
+
+		void releaseServer(wsServerCallbackContext *pContext)
+		{
+			if (!pContext)
+				return;
+
+			pthread_mutex_lock(&pContext->m_mutex);
+			if (--pContext->m_nActive == 0)
+				pthread_cond_broadcast(&pContext->m_idle);
+			pthread_mutex_unlock(&pContext->m_mutex);
+		}
+	}
 
 	_WebSocketServer::_WebSocketServer()
 	{
 		m_pTr = nullptr;
-		g_pWSserver = this;
-		m_nClientMax = 128;
+		pthread_mutex_init(&m_clientMutex, NULL);
+		m_nClientMax = MAX_CLIENTS;
+		m_nPacket = 256;
+		m_nMessageMax = 1024 * 1024;
+		m_nQueueBytesMax = 4 * 1024 * 1024;
 		m_wsMode = wsSocket_txt_bcast;
 
 		m_host = "localhost";
 		m_port = 8080;
 		m_tOutMs = 1000;
+
+		m_pCallbackContext = new wsServerCallbackContext();
+		pthread_mutex_init(&m_pCallbackContext->m_mutex, NULL);
+		pthread_cond_init(&m_pCallbackContext->m_idle, NULL);
+		m_pCallbackContext->m_pServer = this;
+		m_pCallbackContext->m_nActive = 0;
+		m_pCallbackContext->m_bStopping = false;
 	}
 
 	_WebSocketServer::~_WebSocketServer()
 	{
+		m_ioStatus = io_closed;
+		if (m_pT)
+		{
+			m_pT->stop();
+			m_pT->join();
+		}
+
+		// wsServer has no listener-stop API. Retire this process-lifetime
+		// callback context and wait for callbacks already using this object.
+		// The listener thread and token are intentionally retained until exit.
+		pthread_mutex_lock(&m_pCallbackContext->m_mutex);
+		m_pCallbackContext->m_bStopping = true;
+		m_pCallbackContext->m_pServer = nullptr;
+		while (m_pCallbackContext->m_nActive > 0)
+			pthread_cond_wait(&m_pCallbackContext->m_idle,
+							  &m_pCallbackContext->m_mutex);
+		pthread_mutex_unlock(&m_pCallbackContext->m_mutex);
+
+		const vector<shared_ptr<wsClient>> vClient = getClientSnapshot();
+		pthread_mutex_lock(&m_clientMutex);
 		m_vClient.clear();
+		pthread_mutex_unlock(&m_clientMutex);
+
+		for (const shared_ptr<wsClient> &pClient : vClient)
+		{
+			shared_ptr<_WebSocket> pWS = pClient->getWS();
+			if (pWS)
+				pWS->setIOstatus(io_closed);
+			ws_close_client(pClient->m_wsConn);
+		}
+
+		if (m_pTr)
+		{
+			m_pTr->stop();
+			if (m_pTr->bStop())
+			{
+				m_pTr->join();
+				DEL(m_pTr);
+			}
+			else
+			{
+				// Its ws_socket() call is blocked forever in the dependency's
+				// accept loop. The callback token above makes retaining it safe.
+				m_pTr = nullptr;
+			}
+		}
+
+		pthread_mutex_destroy(&m_clientMutex);
 	}
 
 	bool _WebSocketServer::init(const json &j)
@@ -37,6 +139,18 @@ namespace kai
 		jKv(j, "port", m_port);
 		jKv(j, "tOutMs", m_tOutMs);
 		jKv(j, "nClientMax", m_nClientMax);
+		jKv(j, "nPacket", m_nPacket);
+		jKv(j, "nMessageMax", m_nMessageMax);
+		jKv(j, "nQueueBytesMax", m_nQueueBytesMax);
+
+		IF_F(m_wsMode < wsSocket_bin || m_wsMode > wsSocket_txt_bcast);
+		IF_F(m_nClientMax <= 0);
+		IF_F(m_nPacket <= 0);
+		IF_F(m_nMessageMax <= 0 || m_nMessageMax > MAX_FRAME_LENGTH);
+		IF_F(m_nQueueBytesMax <= 0);
+		m_nClientMax = small<int>(m_nClientMax, MAX_CLIENTS);
+		IF_F(!m_packetW.init(m_nMessageMax, m_nPacket, ioPacket_message,
+							 static_cast<size_t>(m_nQueueBytesMax)));
 
 		DEL(m_pTr);
 		m_pTr = createThread(jK(j, "threadR"), "threadR");
@@ -70,40 +184,39 @@ namespace kai
 		{
 			m_pT->autoFPS();
 
-			for (wsClient c : m_vClient)
+			const vector<shared_ptr<wsClient>> vClient = getClientSnapshot();
+			if (vClient.empty())
+				continue;
+
+			const bool bBroadcast = (m_wsMode == wsSocket_bin_bcast ||
+									 m_wsMode == wsSocket_txt_bcast);
+			const int frameType = (m_wsMode == wsSocket_bin ||
+								 m_wsMode == wsSocket_bin_bcast)
+								? WS_FR_OP_BIN
+								: WS_FR_OP_TXT;
+
+			vector<uint8_t> msg;
+			while (m_packetW.getPacket(&msg))
 			{
-				_WebSocket *pWS = c.getWS();
+				const char *pMsg = reinterpret_cast<const char *>(msg.data());
+				const uint64_t nB = static_cast<uint64_t>(msg.size());
+				if (bBroadcast)
+					ws_sendframe_bcast(m_port, pMsg, nB, frameType);
+				else
+					ws_sendframe(vClient.front()->m_wsConn, pMsg, nB, frameType);
+			}
+
+			for (const shared_ptr<wsClient> &pClient : vClient)
+			{
+				shared_ptr<_WebSocket> pWS = pClient->getWS();
 				IF_CONT(!pWS);
 
 				IO_PACKET_FIFO *pPw = pWS->getPacketFIFOw();
-				uint8_t pB[WS_N_BUF];
-				int nB;
-				while ((nB = pPw->getPacket(pB, WS_N_BUF)) > 0)
+				while (pPw->getPacket(&msg))
 				{
-					if (m_wsMode == wsSocket_bin)
-					{
-						ws_sendframe_bin(c.m_wsConn, (char *)pB, nB);
-					}
-					else if (m_wsMode == wsSocket_bin_bcast)
-					{
-						ws_sendframe_bin_bcast(c.m_wsConn, (char *)pB, nB);
-					}
-					else if (m_wsMode == wsSocket_txt)
-					{
-						pB[nB] = 0;
-						ws_sendframe_txt(c.m_wsConn, (char *)pB);
-					}
-					else if (m_wsMode == wsSocket_txt_bcast)
-					{
-						pB[nB] = 0;
-						ws_sendframe_txt_bcast(c.m_wsConn, (char *)pB);
-					}
-
-					/**
-					 * Alternative functions:
-					 *	 ws_sendframe_bcast(8080, (char *)msg, size, type);
-					 *   ws_sendframe()
-					 */
+					const char *pMsg = reinterpret_cast<const char *>(msg.data());
+					const uint64_t nB = static_cast<uint64_t>(msg.size());
+					ws_sendframe(pClient->m_wsConn, pMsg, nB, frameType);
 				}
 			}
 		}
@@ -116,6 +229,7 @@ namespace kai
 		ws.port = m_port;
 		ws.thread_loop = 0;
 		ws.timeout_ms = m_tOutMs;
+		ws.context = m_pCallbackContext;
 		ws.evs.onopen = &sCbOpen;
 		ws.evs.onclose = &sCbClose;
 		ws.evs.onmessage = &sCbMessage;
@@ -125,29 +239,27 @@ namespace kai
 
 	int _WebSocketServer::nClient(void)
 	{
-		return m_vClient.size();
+		pthread_mutex_lock(&m_clientMutex);
+		const int n = static_cast<int>(m_vClient.size());
+		pthread_mutex_unlock(&m_clientMutex);
+		return n;
 	}
 
-	_WebSocket *_WebSocketServer::getClient(int i)
+	shared_ptr<_WebSocket> _WebSocketServer::getClientShared(int i)
 	{
-		wsClient *pC = getWSclient(i);
+		shared_ptr<wsClient> pC = getWSclient(i);
 		NULL_N(pC);
-
 		return pC->getWS();
 	}
 
 	bool _WebSocketServer::write(uint8_t *pBuf, int nB)
 	{
-		_WebSocket *pWS = getClient(0);
-		NULL_F(pWS);
-
-		pWS->write(pBuf, nB);
-		return true;
+		return this->_IObase::write(pBuf, nB);
 	}
 
 	int _WebSocketServer::read(uint8_t *pBuf, int nB)
 	{
-		_WebSocket *pWS = getClient(0);
+		shared_ptr<_WebSocket> pWS = getClientShared(0);
 		NULL__(pWS, 0);
 
 		return pWS->read(pBuf, nB);
@@ -155,21 +267,30 @@ namespace kai
 
 	void _WebSocketServer::sCbOpen(ws_cli_conn_t client)
 	{
-		NULL_(g_pWSserver);
-		g_pWSserver->cbOpen(client);
+		wsServerCallbackContext *pContext = nullptr;
+		_WebSocketServer *pServer = acquireServer(client, &pContext);
+		NULL_(pServer);
+		pServer->cbOpen(client);
+		releaseServer(pContext);
 	}
 
 	void _WebSocketServer::sCbClose(ws_cli_conn_t client)
 	{
-		NULL_(g_pWSserver);
-		g_pWSserver->cbClose(client);
+		wsServerCallbackContext *pContext = nullptr;
+		_WebSocketServer *pServer = acquireServer(client, &pContext);
+		NULL_(pServer);
+		pServer->cbClose(client);
+		releaseServer(pContext);
 	}
 
 	void _WebSocketServer::sCbMessage(ws_cli_conn_t client,
 									  const unsigned char *msg, uint64_t size, int type)
 	{
-		NULL_(g_pWSserver);
-		g_pWSserver->cbMessage(client, msg, size, type);
+		wsServerCallbackContext *pContext = nullptr;
+		_WebSocketServer *pServer = acquireServer(client, &pContext);
+		NULL_(pServer);
+		pServer->cbMessage(client, msg, size, type);
+		releaseServer(pContext);
 	}
 
 	void _WebSocketServer::cbOpen(ws_cli_conn_t client)
@@ -178,26 +299,34 @@ namespace kai
 		cli = ws_getaddress(client);
 		port = ws_getport(client);
 
-		IF_(m_vClient.size() >= m_nClientMax);
-
 		json j = json::object();
-		j["name"] = this->getName() + ".WS" + i2str(m_vClient.size());
+		j["name"] = this->getName() + ".WS" + li2str(client);
 		j["class"] = "_WebSocket";
-		j["nPacket"] = 1024;
-		j["nPbuffer"] = 512;
+		j["nPacket"] = m_nPacket;
+		j["nMessageMax"] = m_nMessageMax;
+		j["nQueueBytesMax"] = m_nQueueBytesMax;
 		json jT = json::object();
 		jT["FPS"] = 1;
 		j["thread"] = jT;
 
-		_WebSocket *pWS = new _WebSocket();
-		pWS->init(j);
+		shared_ptr<_WebSocket> pWS = make_shared<_WebSocket>();
+		IF_(!pWS->init(j));
 		pWS->setIOstatus(io_opened);
 
-		wsClient c;
-		c.init(pWS);
-		c.m_wsConn = client;
+		shared_ptr<wsClient> pClient = make_shared<wsClient>();
+		IF_(!pClient->init(pWS));
+		pClient->m_wsConn = client;
 
-		m_vClient.push_back(c);
+		pthread_mutex_lock(&m_clientMutex);
+		if (m_vClient.size() >= static_cast<size_t>(m_nClientMax))
+		{
+			pthread_mutex_unlock(&m_clientMutex);
+			pWS->setIOstatus(io_closed);
+			ws_close_client(client);
+			return;
+		}
+		m_vClient.push_back(pClient);
+		pthread_mutex_unlock(&m_clientMutex);
 
 		LOG_I("Connection opened, addr: " + string(cli) + ", port: " + string(port));
 	}
@@ -207,20 +336,13 @@ namespace kai
 		char *cli;
 		cli = ws_getaddress(client);
 
-		// TODO: add mutex
-		int iC = findWSclientIdx(client);
-		IF_(iC < 0);
-
-		wsClient *pClient = getWSclient(iC);
+		shared_ptr<wsClient> pClient = removeWSclient(client);
 		NULL_(pClient);
 
-		_WebSocket *pWS = pClient->getWS();
+		shared_ptr<_WebSocket> pWS = pClient->getWS();
 		NULL_(pWS);
 
 		pWS->setIOstatus(io_closed);
-		delete pWS;
-
-		delWSclient(iC);
 
 		LOG_I("Connection closed, addr: " + string(cli));
 	}
@@ -231,53 +353,73 @@ namespace kai
 		char *cli;
 		cli = ws_getaddress(client);
 
-		wsClient *pC = findWSclient(client);
+		shared_ptr<wsClient> pC = findWSclient(client);
 		NULL_(pC);
 
-		_WebSocket *pWS = pC->getWS();
+		shared_ptr<_WebSocket> pWS = pC->getWS();
 		NULL_(pWS);
 
 		IO_PACKET_FIFO *pFifo = pWS->getPacketFIFOr();
 		NULL_(pFifo);
 
-		pFifo->setPacket((uint8_t *)msg, size);
+		IF_(size > static_cast<uint64_t>(numeric_limits<int>::max()));
+		IF_(!pFifo->setPacket(msg, static_cast<int>(size)));
 
-		LOG_I("Received message: " + string((char *)msg) + ", size: " + i2str(size) + ", type: " + i2str(type) + ", from: " + string(cli));
+		LOG_I("Received message, size: " + li2str(size) + ", type: " + i2str(type) + ", from: " + string(cli));
 	}
 
-	wsClient *_WebSocketServer::findWSclient(ws_cli_conn_t wsCli)
+	shared_ptr<wsClient> _WebSocketServer::findWSclient(ws_cli_conn_t wsCli)
 	{
-		return getWSclient(findWSclientIdx(wsCli));
-	}
-
-	int _WebSocketServer::findWSclientIdx(ws_cli_conn_t wsCli)
-	{
-		for (int i = 0; i < m_vClient.size(); i++)
+		pthread_mutex_lock(&m_clientMutex);
+		for (const shared_ptr<wsClient> &pClient : m_vClient)
 		{
-			wsClient *pWSc = &m_vClient[i];
-			IF_CONT(pWSc->m_wsConn != wsCli);
-
-			return i;
+			if (pClient->m_wsConn == wsCli)
+			{
+				pthread_mutex_unlock(&m_clientMutex);
+				return pClient;
+			}
 		}
-
-		return -1;
+		pthread_mutex_unlock(&m_clientMutex);
+		return nullptr;
 	}
 
-	wsClient *_WebSocketServer::getWSclient(int i)
+	shared_ptr<wsClient> _WebSocketServer::getWSclient(int i)
 	{
 		IF_N(i < 0);
-		IF_N(m_vClient.size() <= i);
-
-		return &m_vClient[i];
+		pthread_mutex_lock(&m_clientMutex);
+		if (static_cast<size_t>(i) >= m_vClient.size())
+		{
+			pthread_mutex_unlock(&m_clientMutex);
+			return nullptr;
+		}
+		shared_ptr<wsClient> pClient = m_vClient[i];
+		pthread_mutex_unlock(&m_clientMutex);
+		return pClient;
 	}
 
-	void _WebSocketServer::delWSclient(int i)
+	shared_ptr<wsClient> _WebSocketServer::removeWSclient(ws_cli_conn_t wsCli)
 	{
-		IF_(i < 0);
-		IF_(m_vClient.size() <= i);
+		pthread_mutex_lock(&m_clientMutex);
+		for (auto it = m_vClient.begin(); it != m_vClient.end(); ++it)
+		{
+			if ((*it)->m_wsConn != wsCli)
+				continue;
 
-		// TODO: add mutex
-		m_vClient.erase(m_vClient.begin() + i);
+			shared_ptr<wsClient> pClient = *it;
+			m_vClient.erase(it);
+			pthread_mutex_unlock(&m_clientMutex);
+			return pClient;
+		}
+		pthread_mutex_unlock(&m_clientMutex);
+		return nullptr;
+	}
+
+	vector<shared_ptr<wsClient>> _WebSocketServer::getClientSnapshot(void)
+	{
+		pthread_mutex_lock(&m_clientMutex);
+		const vector<shared_ptr<wsClient>> vClient = m_vClient;
+		pthread_mutex_unlock(&m_clientMutex);
+		return vClient;
 	}
 
 	// wsClient *_WebSocketServer::findClient(const string &addr, const string &port)
@@ -289,7 +431,7 @@ namespace kai
 		NULL_(pConsole);
 		this->_IObase::console(pConsole);
 
-		((_Console *)pConsole)->addMsg("nClients: " + i2str(m_vClient.size()), 1);
+		((_Console *)pConsole)->addMsg("nClients: " + i2str(nClient()), 1);
 	}
 
 }
