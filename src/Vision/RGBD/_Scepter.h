@@ -69,6 +69,12 @@ namespace kai
 		bool validateCamCtrl(void);
 		void applyCamCtrl(void);
 
+		// The Scepter SDK init/shutdown pair is process-global, not per-device,
+		// so every instance shares one refcounted initialization.
+		bool openScSDK(void);
+		void closeScSDK(void);
+		bool openScDevice(void);
+
 #ifdef WITH_3D
 		void updatePC(void);
 #endif
@@ -82,9 +88,12 @@ namespace kai
 		}
 
 	protected:
+		bool m_bScSDK; // this instance holds a reference to the process-wide SDK
 		uint32_t m_nDevice;
 		ScDeviceInfo *m_pScDevListInfo;
 		ScDeviceHandle m_scDevHandle;
+		string m_devIP;
+		string m_devSN;
 		ScSensorIntrinsicParameters m_scCamParams;
 		ScCtrl m_scCtrl;
 

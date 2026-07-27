@@ -7,11 +7,21 @@
 
 #include "_Scepter.h"
 
+#include <mutex>
+
 namespace kai
 {
+	// scInitialize()/scShutdown() are process-global, not per-device: a second
+	// scInitialize() returns SC_REINITIALIZED, and a single scShutdown() tears the
+	// SDK down for every device opened by the process. Several _Scepter instances
+	// may therefore share one refcounted initialization, and because each instance
+	// drives it from its own update() thread the refcount needs a mutex.
+	static std::mutex g_scSDKmutex;
+	static int g_scSDKnRef = 0;
 
 	_Scepter::_Scepter()
 	{
+		m_bScSDK = false;
 		m_nDevice = 0;
 		m_pScDevListInfo = nullptr;
 		m_scDevHandle = 0;
@@ -136,6 +146,117 @@ namespace kai
 		return true;
 	}
 
+	bool _Scepter::openScSDK(void)
+	{
+		IF__(m_bScSDK, true);
+
+		std::lock_guard<std::mutex> lock(g_scSDKmutex);
+
+		if (g_scSDKnRef <= 0)
+		{
+			ScStatus status = scInitialize();
+
+			// SC_REINITIALIZED means the SDK is already up, which is success for us.
+			if (status != ScStatus::SC_OK && status != ScStatus::SC_REINITIALIZED)
+			{
+				LOG_E("scInitialize failed: " + i2str(status));
+				return false;
+			}
+
+			g_scSDKnRef = 0;
+		}
+
+		g_scSDKnRef++;
+		m_bScSDK = true;
+		LOG_I("Scepter SDK initialized, nRef: " + i2str(g_scSDKnRef));
+
+		return true;
+	}
+
+	void _Scepter::closeScSDK(void)
+	{
+		IF_(!m_bScSDK);
+
+		std::lock_guard<std::mutex> lock(g_scSDKmutex);
+
+		m_bScSDK = false;
+		g_scSDKnRef--;
+		IF_(g_scSDKnRef > 0);
+
+		g_scSDKnRef = 0;
+		ScStatus status = scShutdown();
+		LOG_I("scShutdown status: " + i2str(status));
+	}
+
+	bool _Scepter::openScDevice(void)
+	{
+		NULL_F(m_pScDevListInfo);
+
+		// Empty devURI keeps the legacy behavior of binding to the first device found.
+		if (m_devURI.empty())
+		{
+			m_devURI = string(m_pScDevListInfo[0].ip);
+			LOG_I("devURI not set, auto-selected: " + m_devURI);
+		}
+
+		int iDev = -1;
+		bool bBySN = false;
+
+		for (uint32_t i = 0; i < m_nDevice; i++)
+		{
+			if (m_devURI == string(m_pScDevListInfo[i].ip))
+			{
+				iDev = (int)i;
+				break;
+			}
+		}
+
+		if (iDev < 0)
+		{
+			for (uint32_t i = 0; i < m_nDevice; i++)
+			{
+				if (m_devURI == string(m_pScDevListInfo[i].serialNumber))
+				{
+					iDev = (int)i;
+					bBySN = true;
+					break;
+				}
+			}
+		}
+
+		if (iDev < 0)
+		{
+			string sDev = "devURI '" + m_devURI + "' matches no detected Scepter device IP or SN. Detected:";
+			for (uint32_t i = 0; i < m_nDevice; i++)
+			{
+				sDev += " [IP: " + string(m_pScDevListInfo[i].ip) +
+						", SN: " + string(m_pScDevListInfo[i].serialNumber) + "]";
+			}
+
+			LOG_E(sDev);
+			return false;
+		}
+
+		m_devIP = string(m_pScDevListInfo[iDev].ip);
+		m_devSN = string(m_pScDevListInfo[iDev].serialNumber);
+
+		m_scDevHandle = 0;
+		ScStatus status = bBySN
+							  ? scOpenDeviceBySN(m_devSN.c_str(), &m_scDevHandle)
+							  : scOpenDeviceByIP(m_devIP.c_str(), &m_scDevHandle);
+
+		if (status != ScStatus::SC_OK)
+		{
+			LOG_E(string(bBySN ? "scOpenDeviceBySN" : "scOpenDeviceByIP") +
+				  " failed: " + i2str(status));
+			return false;
+		}
+
+		LOG_I("Opened device IP: " + m_devIP + ", SN: " + m_devSN);
+
+		return true;
+	}
+
 	bool _Scepter::open(void)
 	{
 		IF__(m_bOpen, true);
@@ -171,14 +292,8 @@ namespace kai
 			return abortOpen("scGetDeviceInfoList failed: " + i2str(status));
 
 		m_scDevHandle = 0;
-		if (m_devURI.empty())
-			m_devURI = string(m_pScDevListInfo[0].ip);
-
-		LOG_I("Device URI: " + m_devURI);
-
-		status = scOpenDeviceByIP(m_devURI.c_str(), &m_scDevHandle);
-		if (status != ScStatus::SC_OK)
-			return abortOpen("scOpenDeviceByIP failed: " + i2str(status));
+		if (!openScDevice())
+			return abortOpen("Cannot open Scepter device: " + m_devURI);
 
 		status = scGetSensorIntrinsicParameters(m_scDevHandle, SC_TOF_SENSOR, &m_scCamParams);
 		cout << "Get scGetSensorIntrinsicParameters status: " << status << endl;
@@ -201,7 +316,7 @@ namespace kai
 		char fw[nBfw] = {0};
 		scGetFirmwareVersion(m_scDevHandle, fw, nBfw);
 		LOG_I("fw  ==  " + string(fw));
-		LOG_I("sn  ==  " + string(m_pScDevListInfo[0].serialNumber));
+		LOG_I("sn  ==  " + m_devSN);
 
 		auto apply = [this](ScStatus scStatus, const string &setting)
 		{
@@ -239,7 +354,8 @@ namespace kai
 		m_scDevHandle = 0;
 		LOG_I("CloseDevice status: " + i2str(status));
 
-		status = scShutdown();
+		// scShutdown() is process-wide, so only the last instance may call it.
+		closeScSDK();
 
 		DEL_ARRAY(m_pScDevListInfo);
 		DEL_ARRAY(m_pScVw);
@@ -259,11 +375,9 @@ namespace kai
 
 	void _Scepter::update(void)
 	{
-		ScStatus status = scInitialize();
-
-		if (status != ScStatus::SC_OK)
+		if (!openScSDK())
 		{
-			LOG_E("ScInitialize failed");
+			LOG_E("Cannot initialize Scepter SDK");
 			return;
 		}
 
